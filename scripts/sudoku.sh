@@ -1,7 +1,8 @@
 #!/bin/bash
 # export DISABLE_COMPILE=1
 run_name="pretrain_mlp_sudoku_gram_50k_valhead"
-torchrun --nproc-per-node 8 --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --nnodes=1 pretrain.py \
+nproc=${NPROC:-$(nvidia-smi -L | wc -l)}
+torchrun --nproc-per-node ${nproc} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --nnodes=1 pretrain.py \
 arch=gram \
 seed=42 \
 global_batch_size=768 \
