@@ -54,8 +54,8 @@ class NQueens:
         self._total_unique_samples = 0
 
         # Track accuracy by number of possible solutions (1-indexed: idx=num_solutions)
-        # _by_num_sol[i] = [correct_count, total_count, coverage_sum] for puzzles with i solutions
-        self._by_num_sol = [[0, 0, 0.0] for _ in range(21)]  # Support up to 20 solutions
+        # _by_num_sol[i] = [majority_correct, total_count, coverage_sum, first_sample_correct] for puzzles with i solutions
+        self._by_num_sol = [[0, 0, 0.0, 0] for _ in range(21)]  # Support up to 20 solutions
 
     def begin_eval(self):
         # Reset counters
@@ -71,7 +71,7 @@ class NQueens:
         self._best_of_n_exact = 0.0
         self._best_of_n_token = 0.0
         # Reset per-solution-count stats
-        self._by_num_sol = [[0, 0, 0.0] for _ in range(21)]
+        self._by_num_sol = [[0, 0, 0.0, 0] for _ in range(21)]
 
     def update_batch_samples(self, batch: Dict[str, torch.Tensor], batch_samples: list, num_samples: int, best_of_n_metrics: Optional[Dict] = None):
         """Process K samples for a batch and compute metrics on-the-fly.
@@ -154,6 +154,8 @@ class NQueens:
                 self._by_num_sol[num_solutions][1] += 1  # total
                 if majority_exact:
                     self._by_num_sol[num_solutions][0] += 1  # correct
+                if puzzle_samples[0][0]:
+                    self._by_num_sol[num_solutions][3] += 1  # first sample correct (pass@1)
                 
                 # Calculate coverage: how many unique GT solutions are covered by K samples
                 if num_solutions > 0:
@@ -205,8 +207,8 @@ class NQueens:
     ) -> Optional[Dict[str, float]]:
         # ===== Aggregate counts across all ranks =====
         # Convert local counts to tensors for reduction
-        # Flatten _by_num_sol: [correct_1, total_1, coverage_1, correct_2, total_2, coverage_2, ...]
-        by_num_sol_flat = [v for triplet in self._by_num_sol for v in triplet]
+        # Flatten _by_num_sol: [correct_1, total_1, coverage_1, first_1, correct_2, total_2, ...]
+        by_num_sol_flat = [v for stats in self._by_num_sol for v in stats]
         local_counts = torch.tensor(
             [self._total_puzzles, self._majority_exact_correct, self._majority_token_correct,
              self._majority_ratio_sum, self._total_unique_samples,
@@ -240,7 +242,7 @@ class NQueens:
         offset = 7 + len(self.pass_Ks) * 2
         global_correctness_counts = [int(global_counts[offset + i].item()) for i in range(101)]
         offset += 101
-        global_by_num_sol = [[int(global_counts[offset + i*3].item()), int(global_counts[offset + i*3 + 1].item()), global_counts[offset + i*3 + 2].item()] for i in range(21)]
+        global_by_num_sol = [[int(global_counts[offset + i*4].item()), int(global_counts[offset + i*4 + 1].item()), global_counts[offset + i*4 + 2].item(), int(global_counts[offset + i*4 + 3].item())] for i in range(21)]
 
         # Compute final metrics (percentages from aggregated counts)
         results = {}
@@ -282,11 +284,12 @@ class NQueens:
 
         # Accuracy by number of solutions
         for num_sol in range(1, 21):
-            correct, total, coverage_sum = global_by_num_sol[num_sol]
+            correct, total, coverage_sum, first_correct = global_by_num_sol[num_sol]
             if total > 0:
                 acc = correct / total
                 avg_coverage = coverage_sum / total
                 results[f"NQueens/majority_exact_{num_sol}sol"] = acc
+                results[f"NQueens/exact_pass@1_{num_sol}sol"] = first_correct / total
                 results[f"NQueens/answer_coverage_{num_sol}sol"] = avg_coverage
                 results[f"NQueens/count_{num_sol}sol"] = total
 
