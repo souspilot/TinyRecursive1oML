@@ -10,7 +10,8 @@
 #   trm_unique   TRM on single-solution inputs only           (1oML "Unique")
 #   trm_minloss  TRM trained towards the closest solution     (1oML "MinLoss")
 #   trm_iexplr   TRM sampling solutions by model likelihood   (1oML "I-ExplR")
-#   trm_selectr  TRM with a learned target selector           (1oML "SelectR"); set INIT_CKPT to a trm_minloss checkpoint
+#   trm_selectr  TRM with a learned target selector           (1oML "SelectR"); starts from the trm_minloss run's
+#                final checkpoint, or the checkpoint in INIT_CKPT if set
 #
 # Datasets (build once):
 #   python dataset/build_nqueens_dataset.py --n 8 --remove-counts 5 6 7 --output-dir data/nqueens-8
@@ -37,10 +38,19 @@ case $method in
   trm_minloss) data=data/nqueens-${n}-1oml   arch_args="${trm_args} arch.loss.one_of_many=minloss" ;;
   trm_iexplr)  data=data/nqueens-${n}-1oml   arch_args="${trm_args} arch.loss.one_of_many=iexplr" ;;
   trm_selectr)
+    minloss_dir=checkpoints/Nqueens-${n}-compare/trm_minloss_seed${SEED:-42}
     if [ -z "${INIT_CKPT}" ]; then
-      echo "SelectR starts from a MinLoss model: set INIT_CKPT=checkpoints/.../step_X/checkpoint.pt from a trm_minloss run"
+      INIT_CKPT=${minloss_dir}/final/checkpoint.pt
+      if [ ! -f "${INIT_CKPT}" ]; then
+        # Runs from before final/ was saved: use their last step
+        INIT_CKPT=$(ls -d ${minloss_dir}/step_*/checkpoint.pt 2>/dev/null | sort -V | tail -n 1)
+      fi
+    fi
+    if [ ! -f "${INIT_CKPT}" ]; then
+      echo "SelectR starts from a MinLoss model, but no checkpoint was found in ${minloss_dir}. Run trm_minloss first, or set INIT_CKPT."
       exit 1
     fi
+    echo "SelectR starting from ${INIT_CKPT}"
     data=data/nqueens-${n}-1oml
     arch_args="${trm_args} arch.loss.one_of_many=selectr +load_checkpoint=${INIT_CKPT}" ;;
   *) echo "Unknown method: ${method}"; exit 1 ;;
