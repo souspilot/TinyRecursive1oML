@@ -136,17 +136,22 @@ def find_all_solutions(input_board, n=None, max_solutions=20):
 def batch_verify_nqueens(inputs, predictions, n=None):
     """Verify batch of N-Queens predictions. Returns (B,) boolean tensor.
 
+    A prediction is correct only if it is a valid N-Queens board that keeps every
+    queen given in the input.
+
     Args:
-        inputs: Input tensor (B, N*N) - not used but kept for API consistency
+        inputs: Input tensor (B, N*N), 2 = given queen
         predictions: Prediction tensor (B, N*N)
         n: Board size (inferred if None)
 
     Returns:
         torch.Tensor: Boolean tensor of shape (B,)
     """
+    inputs_np = inputs.cpu().numpy()
     preds_np = predictions.cpu().numpy()
 
-    is_correct = np.array([verify_nqueens(preds_np[i], n)
+    keeps_given = ((inputs_np != 2) | (preds_np == 2)).all(axis=-1)
+    is_correct = np.array([keeps_given[i] and verify_nqueens(preds_np[i], n)
                            for i in range(len(preds_np))], dtype=bool)
 
     return torch.from_numpy(is_correct).to(predictions.device)

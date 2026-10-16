@@ -2,6 +2,13 @@ name: recursive_reasoning.trm@TinyRecursiveReasoningModel_ACTV1
 loss:
   name: losses@ACTLossHead
   loss_type: stablemax_cross_entropy
+  # One-of-many learning (https://arxiv.org/abs/2008.11990): naive | minloss | iexplr | selectr
+  # Anything but naive needs a dataset built with --one-of-many.
+  one_of_many: naive
+  selectr_pretrain_steps: 250 # SelectR trains on MinLoss targets while G_phi warms up
+  selectr_hidden_size: 128
+  selectr_layers: 2
+  selectr_heads: 4
 
 halt_exploration_prob: 0.1
 halt_max_steps: 16

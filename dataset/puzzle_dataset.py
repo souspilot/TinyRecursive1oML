@@ -129,6 +129,11 @@ class PuzzleDataset(IterableDataset):
             "puzzle_indices": None,
             "group_indices": None
         }
+        # Per-example extras, loaded only if the dataset provides them (e.g. built with --one-of-many)
+        optional_field_mmap_modes = {
+            "label_set": "r",
+            "num_solutions": None,
+        }
 
         # Load data
         self._data = {}
@@ -142,6 +147,10 @@ class PuzzleDataset(IterableDataset):
                     field_name: np.load(os.path.join(dataset_path, self.split, f"{set_name}__{field_name}.npy"), mmap_mode=mmap_mode)
                     for field_name, mmap_mode in field_mmap_modes.items()
                 }
+                for field_name, mmap_mode in optional_field_mmap_modes.items():
+                    field_path = os.path.join(dataset_path, self.split, f"{set_name}__{field_name}.npy")
+                    if os.path.exists(field_path):
+                        self._data[set_name_][field_name] = np.load(field_path, mmap_mode=mmap_mode)
 
 
     def _collate_batch(self, batch):
@@ -151,6 +160,8 @@ class PuzzleDataset(IterableDataset):
         # Convert ignore label IDs
         if self.metadata.ignore_label_id is not None:
             batch["labels"][batch["labels"] == self.metadata.ignore_label_id] = IGNORE_LABEL_ID
+            if "label_set" in batch:
+                batch["label_set"][batch["label_set"] == self.metadata.ignore_label_id] = IGNORE_LABEL_ID
 
         # Pad
         if batch["puzzle_identifiers"].size < self.local_batch_size:
@@ -158,13 +169,18 @@ class PuzzleDataset(IterableDataset):
             pad_values = {
                 "inputs": self.metadata.pad_id,
                 "labels": IGNORE_LABEL_ID,
-                "puzzle_identifiers": self.metadata.blank_identifier_id
+                "puzzle_identifiers": self.metadata.blank_identifier_id,
+                "label_set": IGNORE_LABEL_ID,
+                "num_solutions": 0,
             }
             batch = {k: np.pad(v, ((0, pad_size), ) + ((0, 0), ) * (v.ndim - 1), constant_values=pad_values[k]) for k, v in batch.items()}
 
         # To tensor
         return {k: torch.from_numpy(v) for k, v in batch.items()}
     
+    def _optional_fields(self, dataset, example_indices):
+        return {k: dataset[k][example_indices] for k in ("label_set", "num_solutions") if k in dataset}
+
     def _iter_test(self):
         for set_i, (set_name, dataset) in enumerate(self._data.items()):  # type: ignore
             total_examples = len(dataset["inputs"])
@@ -190,7 +206,8 @@ class PuzzleDataset(IterableDataset):
                 batch = self._collate_batch({
                     "inputs": dataset["inputs"][local_start: local_end],
                     "labels": dataset["labels"][local_start: local_end],
-                    "puzzle_identifiers": dataset["puzzle_identifiers"][puzzle_indices]
+                    "puzzle_identifiers": dataset["puzzle_identifiers"][puzzle_indices],
+                    **self._optional_fields(dataset, slice(local_start, local_end)),
                 })
 
                 yield set_name, batch, end_index - start_index
@@ -231,7 +248,8 @@ class PuzzleDataset(IterableDataset):
                 batch = self._collate_batch({
                     "inputs": dataset["inputs"][batch_indices],
                     "labels": dataset["labels"][batch_indices],
-                    "puzzle_identifiers": dataset["puzzle_identifiers"][batch_puzzle_indices]
+                    "puzzle_identifiers": dataset["puzzle_identifiers"][batch_puzzle_indices],
+                    **self._optional_fields(dataset, batch_indices),
                 })
 
                 yield set_name, batch, global_effective_batch_size
