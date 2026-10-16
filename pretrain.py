@@ -241,12 +241,12 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
     )
 
 
-def save_train_state(config: PretrainConfig, train_state: TrainState, ema_helper=None):
+def save_train_state(config: PretrainConfig, train_state: TrainState, ema_helper=None, name: Optional[str] = None):
     if config.checkpoint_path is None:
         return
 
-    # Save to step directory
-    step_dir = os.path.join(config.checkpoint_path, f"step_{train_state.step}")
+    # Save to step directory (or a named one, e.g. "final")
+    step_dir = os.path.join(config.checkpoint_path, name or f"step_{train_state.step}")
 
     # Remove old file-based checkpoint if it exists
     if os.path.exists(step_dir) and os.path.isfile(step_dir):
@@ -267,7 +267,10 @@ def save_train_state(config: PretrainConfig, train_state: TrainState, ema_helper
     if ema_helper is not None:
         checkpoint['ema'] = ema_helper.state_dict()
 
-    torch.save(checkpoint, os.path.join(step_dir, 'checkpoint.pt'))
+    # Write then rename, so an interrupted save never leaves a truncated checkpoint.pt
+    checkpoint_file = os.path.join(step_dir, 'checkpoint.pt')
+    torch.save(checkpoint, checkpoint_file + '.tmp')
+    os.replace(checkpoint_file + '.tmp', checkpoint_file)
     print(f"Saved checkpoint to {step_dir}")
     if ema_helper is not None:
         print(f"  ✓ Saved EMA helper state")
@@ -724,6 +727,10 @@ def launch(hydra_config: DictConfig):
 
             if config.ema:
                 del train_state_eval
+
+    # Save the end-of-training weights under a fixed name, so later runs can load them without knowing the step
+    if RANK == 0:
+        save_train_state(config, train_state, ema_helper if config.ema else None, name="final")
 
     # finalize
     if dist.is_initialized():

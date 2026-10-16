@@ -106,11 +106,12 @@ bash scripts/nqueens_compare.sh 8 trm_random   # one fixed random solution per i
 bash scripts/nqueens_compare.sh 8 trm_unique   # single-solution inputs only
 bash scripts/nqueens_compare.sh 8 trm_minloss  # train towards the closest solution
 bash scripts/nqueens_compare.sh 8 trm_iexplr   # sample the target by model likelihood
-INIT_CKPT=checkpoints/Nqueens-8-compare/trm_minloss_seed42/step_X/checkpoint.pt \
-  bash scripts/nqueens_compare.sh 8 trm_selectr  # learned target selector, started from MinLoss
+bash scripts/nqueens_compare.sh 8 trm_selectr  # learned target selector, started from trm_minloss's final checkpoint
 ```
 
 The objective is set with `arch.loss.one_of_many` (`naive | minloss | iexplr | selectr`) and works with any dataset built with `--one-of-many`. It requires a model that does not condition on the labels, so it is not available for GRAM. SelectR differs from the paper in two ways: the selector G_φ is a small transformer rather than an NLM, and it sees the current soft prediction instead of a lagged copy of the model (the paper's `copyitr = 1`).
+
+Every training run also saves its end-of-training weights to `checkpoints/<project>/<run>/final/checkpoint.pt`.
 
 ## Evaluation
 

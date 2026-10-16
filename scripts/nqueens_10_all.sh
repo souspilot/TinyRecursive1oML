@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the 10-queens datasets and run every method of scripts/nqueens_compare.sh in sequence.
-# Each run logs to logs/nqueens_10_<method>.log. A finished run leaves logs/nqueens_10_<method>.done,
+# Each run logs to logs/nqueens_10_<method>.log, and SelectR starts from the finished MinLoss run. A finished run leaves logs/nqueens_10_<method>.done,
 # so rerunning this script after an interruption skips completed methods. A failed run is reported
 # at the end without stopping the others.
 #
@@ -35,13 +35,6 @@ for method in gram trm trm_random trm_unique trm_minloss trm_iexplr trm_selectr;
   if [ "${method}" = trm_selectr ]; then
     if [ ! -f logs/nqueens_10_trm_minloss.done ]; then
       echo "== Skipping trm_selectr: trm_minloss has not finished"
-      failed+=("${method}")
-      continue
-    fi
-    # Start from the last checkpoint of the MinLoss run
-    export INIT_CKPT=$(ls -d checkpoints/Nqueens-10-compare/trm_minloss_seed${SEED:-42}/step_*/checkpoint.pt 2>/dev/null | sort -V | tail -n 1)
-    if [ -z "${INIT_CKPT}" ]; then
-      echo "== Skipping trm_selectr: no trm_minloss checkpoint found"
       failed+=("${method}")
       continue
     fi
