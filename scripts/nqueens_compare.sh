@@ -56,8 +56,25 @@ case $method in
   *) echo "Unknown method: ${method}"; exit 1 ;;
 esac
 
+# Claim the run so no other job trains it at the same time. mkdir is atomic, so only one job can win.
+# The claim is kept (marked finished) when training succeeds, and released if it fails or is interrupted.
+run=${method}_seed${SEED:-42}
+claim=checkpoints/Nqueens-${n}-compare/.claims/${run}
+mkdir -p "$(dirname "${claim}")"
+if ! mkdir "${claim}" 2>/dev/null; then
+  if [ -f "${claim}/finished" ]; then
+    echo "${run} has already finished. To train it again, remove ${claim}"
+  else
+    owner=$(cat "${claim}/owner" 2>/dev/null)
+    echo "${run} is claimed by another job (${owner:-claimed just now}). If that job died, remove ${claim}"
+  fi
+  exit 3
+fi
+echo "$(hostname) job=${PBS_JOBID:-none} started $(date '+%F %T')" > "${claim}/owner"
+trap 'rm -rf "${claim}"; exit 130' INT TERM
+
 nproc=${NPROC:-$(nvidia-smi -L | wc -l)}
-torchrun --nproc-per-node ${nproc} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --nnodes=1 pretrain.py \
+if ! torchrun --nproc-per-node ${nproc} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --nnodes=1 pretrain.py \
 ${arch_args} \
 seed=${SEED:-42} \
 global_batch_size=768 \
@@ -67,5 +84,9 @@ evaluators="[]" \
 epochs=${epochs} eval_interval=${eval_interval} \
 lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
 +project_name=Nqueens-${n}-compare \
-+run_name=${method}_seed${SEED:-42} ema=True \
-checkpoint_every_eval=True
++run_name=${run} ema=True \
+checkpoint_every_eval=True; then
+  rm -rf "${claim}"
+  exit 1
+fi
+touch "${claim}/finished"

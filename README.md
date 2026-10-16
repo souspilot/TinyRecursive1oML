@@ -109,6 +109,12 @@ bash scripts/nqueens_compare.sh 8 trm_iexplr   # sample the target by model like
 bash scripts/nqueens_compare.sh 8 trm_selectr  # learned target selector, started from trm_minloss's final checkpoint
 ```
 
+To spread the runs over several GPU jobs, start the same worker in each job. Workers share one queue, so each run is trained once, and SelectR starts as soon as MinLoss has finished:
+
+```bash
+bash scripts/nqueens_worker.sh 10   # in every job; claims live in checkpoints/Nqueens-10-compare/.claims/
+```
+
 Once the runs finish, evaluate them all and print a comparison table (also saved to `results/nqueens_8/summary.md`):
 
 ```bash
