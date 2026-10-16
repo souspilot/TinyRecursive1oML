@@ -7,6 +7,11 @@ Label: Complete solution board
 
 Usage:
     python dataset/build_nqueens_dataset.py --n 8 --remove-counts 3 4 5 --output-dir data/nqueens-8
+
+With --one-of-many, each split holds one row per unique input board. `labels` is
+one of its solutions picked at random (the 1oML "Random" baseline), and
+`label_set` holds every solution, padded with the ignore id, for multi-target
+objectives such as MinLoss and SelectR (https://arxiv.org/abs/2008.11990).
 """
 
 from typing import List, Dict, Optional
@@ -35,6 +40,8 @@ class DataProcessConfig(BaseModel):
     seed: int = 42
     num_aug: int = 0
     multi_sol_ratio: Optional[float] = None
+    one_of_many: bool = False  # One row per input with every solution in label_set
+    train_unique_only: bool = False  # Keep only single-solution inputs in train (1oML "Unique" baseline)
 
 
 def generate_nqueens_solutions(n: int) -> List[np.ndarray]:
@@ -133,21 +140,40 @@ def print_solution_count_statistics(solution_counts: Dict[int, int], split_name:
     print(f"Multi solution inputs: {multi_solution_inputs} ({100*multi_solution_inputs/total_inputs:.2f}%)")
 
 
-def create_split(split_name: str, split_data: List[tuple], n: int, output_dir: str, multi_sol_ratio: Optional[float]):
+def group_by_input(split_data: List[tuple]) -> List[tuple]:
+    """Collapse (input, label, num_solutions) pairs into one item per input carrying every distinct label."""
+    groups = {}
+    for input_board, label_board, num_solutions in split_data:
+        _, labels, _ = groups.setdefault(input_board.tobytes(), (input_board, {}, num_solutions))
+        labels[label_board.tobytes()] = label_board
+    return [(input_board, list(labels.values()), num_solutions) for input_board, labels, num_solutions in groups.values()]
+
+
+def create_split(split_name: str, split_data: List[tuple], n: int, output_dir: str, multi_sol_ratio: Optional[float],
+                 one_of_many: bool = False, unique_only: bool = False):
     """Create and save a dataset split."""
+    if one_of_many:
+        items = group_by_input(split_data)
+    else:
+        items = [(input_board, [label_board], num_solutions) for input_board, label_board, num_solutions in split_data]
+
     single_sol_queue = []
     multi_sol_queue = []
     solution_count_stats: Dict[int, int] = defaultdict(int)
     
-    for input_board, label_board, num_solutions in split_data:
+    for item in items:
+        num_solutions = item[2]
         solution_count_stats[num_solutions] += 1
-        item = (input_board, label_board, num_solutions)
         if num_solutions == 1:
             single_sol_queue.append(item)
         else:
             multi_sol_queue.append(item)
     
     print_solution_count_statistics(solution_count_stats, split_name)
+
+    if unique_only:
+        multi_sol_queue = []
+        print(f"Keeping only single-solution inputs: {len(single_sol_queue)}")
     
     # Apply multi_sol_ratio if specified
     if multi_sol_ratio is not None and len(multi_sol_queue) > 0:
@@ -170,9 +196,9 @@ def create_split(split_name: str, split_data: List[tuple], n: int, output_dir: s
         "num_solutions": []
     }
     
-    for idx, (input_board, label_board, num_solutions) in enumerate(all_items):
+    for idx, (input_board, label_boards, num_solutions) in enumerate(all_items):
         results["inputs"].append(input_board)
-        results["labels"].append(label_board)
+        results["labels"].append(label_boards[np.random.randint(len(label_boards))])
         results["num_solutions"].append(num_solutions)
         results["puzzle_indices"].append(idx + 1)
         results["puzzle_identifiers"].append(0)
@@ -191,6 +217,15 @@ def create_split(split_name: str, split_data: List[tuple], n: int, output_dir: s
         "puzzle_identifiers": np.array(results["puzzle_identifiers"], dtype=np.int32),
         "num_solutions": np.array(results["num_solutions"], dtype=np.int32),
     }
+
+    if one_of_many:
+        # Pad with 0, the ignore label id, so missing targets are skipped by the loss
+        max_targets = max(len(label_boards) for _, label_boards, _ in all_items)
+        label_set = np.zeros((len(all_items), max_targets, n * n), dtype=np.uint8)
+        for idx, (_, label_boards, _) in enumerate(all_items):
+            label_set[idx, :len(label_boards)] = np.stack(label_boards).reshape(len(label_boards), -1) + 1
+        results["label_set"] = label_set
+        print(f"label_set: up to {max_targets} targets per input")
     
     n_groups = len(results["group_indices"]) - 1
     
@@ -276,8 +311,10 @@ def build_nqueens_dataset(config: DataProcessConfig):
     print(f"Train inputs: {len(train_input_keys)} ({len(train_data)} examples)")
     print(f"Test inputs: {len(test_input_keys)} ({len(test_data)} examples)")
     
-    create_split("train", train_data, config.n, config.output_dir, config.multi_sol_ratio)
-    create_split("test", test_data, config.n, config.output_dir, config.multi_sol_ratio)
+    create_split("train", train_data, config.n, config.output_dir, config.multi_sol_ratio,
+                 one_of_many=config.one_of_many, unique_only=config.train_unique_only)
+    create_split("test", test_data, config.n, config.output_dir, config.multi_sol_ratio,
+                 one_of_many=config.one_of_many)
     
     # Save identifiers mapping
     with open(os.path.join(config.output_dir, "identifiers.json"), "w") as f:

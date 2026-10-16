@@ -91,6 +91,27 @@ bash scripts/graph_coloring_10.sh
 bash scripts/mnist.sh
 ```
 
+## One-of-Many Learning (1oML) comparison on N-Queens
+
+`scripts/nqueens_compare.sh` compares GRAM and vanilla TRM against TRM trained with the solution-multiplicity-aware objectives of [Nandwani et al., ICLR 2021](https://arxiv.org/abs/2008.11990). All methods are evaluated on the same test split: one row per unique input, checked by the N-Queens verifier. Metrics include `exact_accuracy_os` and `exact_accuracy_ms` for one-solution and multi-solution queries.
+
+```bash
+# Datasets: --one-of-many stores every solution of an input in label_set
+python dataset/build_nqueens_dataset.py --n 8 --remove-counts 5 6 7 --output-dir data/nqueens-8-1oml --one-of-many
+python dataset/build_nqueens_dataset.py --n 8 --remove-counts 5 6 7 --output-dir data/nqueens-8-unique --one-of-many --train-unique-only
+
+bash scripts/nqueens_compare.sh 8 gram         # GRAM on every (input, solution) pair
+bash scripts/nqueens_compare.sh 8 trm          # 1oML "Naive": TRM on every (input, solution) pair
+bash scripts/nqueens_compare.sh 8 trm_random   # one fixed random solution per input
+bash scripts/nqueens_compare.sh 8 trm_unique   # single-solution inputs only
+bash scripts/nqueens_compare.sh 8 trm_minloss  # train towards the closest solution
+bash scripts/nqueens_compare.sh 8 trm_iexplr   # sample the target by model likelihood
+INIT_CKPT=checkpoints/Nqueens-8-compare/trm_minloss_seed42/step_X/checkpoint.pt \
+  bash scripts/nqueens_compare.sh 8 trm_selectr  # learned target selector, started from MinLoss
+```
+
+The objective is set with `arch.loss.one_of_many` (`naive | minloss | iexplr | selectr`) and works with any dataset built with `--one-of-many`. It requires a model that does not condition on the labels, so it is not available for GRAM. SelectR differs from the paper in two ways: the selector G_φ is a small transformer rather than an NLM, and it sees the current soft prediction instead of a lagged copy of the model (the paper's `copyitr = 1`).
+
 ## Evaluation
 
 ```bash

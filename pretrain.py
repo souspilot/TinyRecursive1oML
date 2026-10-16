@@ -295,7 +295,11 @@ def load_checkpoint(model: nn.Module, config: PretrainConfig):
                 state_dict[puzzle_emb_name] = (
                     torch.mean(puzzle_emb, dim=0, keepdim=True).expand(expected_shape).contiguous()
                 )
-        model.load_state_dict(state_dict, assign=True)
+        # A SelectR run may start from a MinLoss checkpoint, which has no selector weights yet
+        missing, unexpected = model.load_state_dict(state_dict, assign=True, strict=False)
+        missing = [k for k in missing if ".selector." not in k]
+        if missing or unexpected:
+            raise RuntimeError(f"Checkpoint mismatch. Missing keys: {missing}. Unexpected keys: {unexpected}")
 
 
 def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
@@ -323,6 +327,14 @@ def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetada
                 cls.precompute_real_features(eval_loader, device=torch.device("cuda"))
             evaluators.append(cls)
     return evaluators
+
+def subset_count(metrics: dict, key: str) -> Optional[float]:
+    """Metrics suffixed _os / _ms (one- vs multi-solution queries) are averaged over their own subset."""
+    for suffix in ("_os", "_ms"):
+        if key.endswith(suffix) and not key.startswith("count") and f"count{suffix}" in metrics:
+            return max(metrics[f"count{suffix}"], 1)
+    return None
+
 
 def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
     train_state.step += 1
@@ -379,7 +391,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             
             # Postprocess
             count = max(reduced_metrics["count"], 1)  # Avoid NaNs
-            reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
+            reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else (subset_count(reduced_metrics, k) or count)) for k, v in reduced_metrics.items()}
 
             reduced_metrics["train/lr"] = lr_this_step
             return reduced_metrics
@@ -495,7 +507,7 @@ def evaluate(
                 # Postprocess
                 for set_name, m in reduced_metrics.items():
                     count = m.pop("count")
-                    reduced_metrics[set_name] = {k: v / count for k, v in m.items()}
+                    reduced_metrics[set_name] = {k: v / (subset_count(m, k) or count) for k, v in m.items()}
 
         # Run evaluators
         if rank == 0:
@@ -655,7 +667,8 @@ def launch(hydra_config: DictConfig):
             checkpoint = torch.load(config.load_checkpoint, map_location="cuda", weights_only=False)
             if 'ema' in checkpoint:
                 print('  ✓ Loading EMA state from checkpoint')
-                ema_helper.load_state_dict(checkpoint['ema'])
+                # Keep freshly registered entries (e.g. a new selector) the checkpoint lacks
+                ema_helper.load_state_dict({**ema_helper.state_dict(), **checkpoint['ema']})
     
 
     # Training Loop
