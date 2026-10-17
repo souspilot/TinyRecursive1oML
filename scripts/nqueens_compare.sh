@@ -13,6 +13,9 @@
 #   trm_selectr  TRM with a learned target selector           (1oML "SelectR"); starts from the trm_minloss run's
 #                final checkpoint, or the checkpoint in INIT_CKPT if set
 #
+# RESUME=1 continues an interrupted run (e.g. killed at walltime) from its latest checkpoint, with its
+# optimizer state, step and data order, instead of starting over.
+#
 # Datasets (build once):
 #   python dataset/build_nqueens_dataset.py --n 8 --remove-counts 5 6 7 --output-dir data/nqueens-8
 #   python dataset/build_nqueens_dataset.py --n 8 --remove-counts 5 6 7 --output-dir data/nqueens-8-1oml --one-of-many
@@ -38,23 +41,42 @@ case $method in
   trm_minloss) data=data/nqueens-${n}-1oml   arch_args="${trm_args} arch.loss.one_of_many=minloss" ;;
   trm_iexplr)  data=data/nqueens-${n}-1oml   arch_args="${trm_args} arch.loss.one_of_many=iexplr" ;;
   trm_selectr)
-    minloss_dir=checkpoints/Nqueens-${n}-compare/trm_minloss_seed${SEED:-42}
-    if [ -z "${INIT_CKPT}" ]; then
-      INIT_CKPT=${minloss_dir}/final/checkpoint.pt
-      if [ ! -f "${INIT_CKPT}" ]; then
-        # Runs from before final/ was saved: use their last step
-        INIT_CKPT=$(ls -d ${minloss_dir}/step_*/checkpoint.pt 2>/dev/null | sort -V | tail -n 1)
-      fi
-    fi
-    if [ ! -f "${INIT_CKPT}" ]; then
-      echo "SelectR starts from a MinLoss model, but no checkpoint was found in ${minloss_dir}. Run trm_minloss first, or set INIT_CKPT."
-      exit 1
-    fi
-    echo "SelectR starting from ${INIT_CKPT}"
     data=data/nqueens-${n}-1oml
-    arch_args="${trm_args} arch.loss.one_of_many=selectr +load_checkpoint=${INIT_CKPT}" ;;
+    arch_args="${trm_args} arch.loss.one_of_many=selectr"
+    # A resumed run loads its own checkpoint instead (below)
+    if [ -z "${RESUME}" ]; then
+      minloss_dir=checkpoints/Nqueens-${n}-compare/trm_minloss_seed${SEED:-42}
+      if [ -z "${INIT_CKPT}" ]; then
+        INIT_CKPT=${minloss_dir}/final/checkpoint.pt
+        if [ ! -f "${INIT_CKPT}" ]; then
+          # Runs from before final/ was saved: use their last step
+          INIT_CKPT=$(ls -d ${minloss_dir}/step_*/checkpoint.pt 2>/dev/null | sort -V | tail -n 1)
+        fi
+      fi
+      if [ ! -f "${INIT_CKPT}" ]; then
+        echo "SelectR starts from a MinLoss model, but no checkpoint was found in ${minloss_dir}. Run trm_minloss first, or set INIT_CKPT."
+        exit 1
+      fi
+      echo "SelectR starting from ${INIT_CKPT}"
+      arch_args="${arch_args} +load_checkpoint=${INIT_CKPT}"
+    fi ;;
   *) echo "Unknown method: ${method}"; exit 1 ;;
 esac
+
+if [ -n "${RESUME}" ]; then
+  run_dir=checkpoints/Nqueens-${n}-compare/${method}_seed${SEED:-42}
+  if [ -f "${run_dir}/final/checkpoint.pt" ]; then
+    echo "${run_dir} has already finished (final/ exists), nothing to resume"
+    exit 1
+  fi
+  resume_ckpt=$(ls -d ${run_dir}/step_*/checkpoint.pt 2>/dev/null | sort -V | tail -n 1)
+  if [ -z "${resume_ckpt}" ]; then
+    echo "No checkpoint to resume from in ${run_dir}"
+    exit 1
+  fi
+  echo "Resuming from ${resume_ckpt}"
+  arch_args="${arch_args} +load_checkpoint=${resume_ckpt} +resume=True"
+fi
 
 # Claim the run so no other job trains it at the same time. mkdir is atomic, so only one job can win.
 # The claim is kept (marked finished) when training succeeds, and released if it fails or is interrupted.

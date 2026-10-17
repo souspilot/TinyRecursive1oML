@@ -115,6 +115,12 @@ To spread the runs over several GPU jobs, start the same worker in each job. Wor
 bash scripts/nqueens_worker.sh 10   # in every job; claims live in checkpoints/Nqueens-10-compare/.claims/
 ```
 
+If a job is killed (e.g. at walltime), continue its run from the latest checkpoint, with optimizer state, step and data order restored:
+
+```bash
+RESUME=1 bash scripts/nqueens_compare.sh 10 gram
+```
+
 Once the runs finish, evaluate them all and print a comparison table (also saved to `results/nqueens_8/summary.md`):
 
 ```bash

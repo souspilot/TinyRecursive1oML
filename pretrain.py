@@ -74,6 +74,7 @@ class PretrainConfig(pydantic.BaseModel):
     project_name: Optional[str] = None
     run_name: Optional[str] = None
     load_checkpoint: Optional[str] = None
+    resume: bool = False  # With load_checkpoint: also restore optimizer state and step, and continue the run from there
     checkpoint_path: Optional[str] = None
 
     # Extras
@@ -98,6 +99,8 @@ class TrainState:
 
     step: int
     total_steps: int
+
+    iters_done: int = 0  # Completed eval intervals, saved so a resumed run continues from the next one
 
 
 def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size: int, **kwargs):
@@ -261,6 +264,7 @@ def save_train_state(config: PretrainConfig, train_state: TrainState, ema_helper
         'model': train_state.model.state_dict(),
         'puzzle_emb': train_state.model.model.puzzle_emb.state_dict(),
         'optimizer': [opt.state_dict() for opt in train_state.optimizers],
+        'iters_done': train_state.iters_done,
     }
 
     # Save EMA helper state if available
@@ -672,10 +676,32 @@ def launch(hydra_config: DictConfig):
                 print('  ✓ Loading EMA state from checkpoint')
                 # Keep freshly registered entries (e.g. a new selector) the checkpoint lacks
                 ema_helper.load_state_dict({**ema_helper.state_dict(), **checkpoint['ema']})
-    
+
+    # Resume: the model and EMA weights are loaded above; also restore the optimizer and step, and
+    # continue from the next eval interval with the data order the original run would have used
+    start_iter = 0
+    if config.resume:
+        assert config.load_checkpoint is not None, "resume needs load_checkpoint"
+        checkpoint = torch.load(config.load_checkpoint, map_location="cuda", weights_only=False)
+        for optim, optim_state in zip(train_state.optimizers, checkpoint['optimizer']):
+            optim.load_state_dict(optim_state)
+        train_state.step = checkpoint['step']
+        if 'iters_done' in checkpoint:
+            start_iter = checkpoint['iters_done']
+        else:
+            # Older checkpoints: every eval interval is the same number of steps (one example per group)
+            steps_per_iter = train_epochs_per_iter * train_metadata.total_groups // config.global_batch_size
+            if train_state.step % steps_per_iter != 0:
+                raise ValueError(f"Can't tell which eval interval step {train_state.step} ends ({steps_per_iter} steps each)")
+            start_iter = train_state.step // steps_per_iter
+        train_state.iters_done = start_iter
+        train_loader.dataset._iters = start_iter  # type: ignore
+        print(f"Resuming at step {train_state.step}, epoch {start_iter * train_epochs_per_iter} of {config.epochs}")
+        if progress_bar is not None:
+            progress_bar.update(train_state.step)
 
     # Training Loop
-    for _iter_id in range(total_iters):
+    for _iter_id in range(start_iter, total_iters):
         print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
 
         ############ Train Iter
@@ -690,6 +716,7 @@ def launch(hydra_config: DictConfig):
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
             if config.ema:
                 ema_helper.update(train_state.model)
+        train_state.iters_done = _iter_id + 1
 
         if _iter_id >= config.min_eval_interval:
             ############ Evaluation
