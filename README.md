@@ -147,6 +147,24 @@ bash scripts/hidden_constraints.sh 10   # results/hidden_constraints_10/summary.
 Sampling is saved in shards (`samples/`), so rerunning after an interruption continues where it stopped, and it uses
 every visible GPU. The analysis (`scripts/analyze_nqueens_samples.py`) runs on CPU from the saved samples.
 
+## Mazes with several shortest paths
+
+A second domain for the same comparison, chosen so that test answers can't be memorized and solution sets can be
+large without being listed. 15x15 mazes have between 1 and 924 shortest paths; their number, and the share
+through each cell, are counted exactly (`evaluators/maze_utils.py`), and any shortest path counts as correct.
+
+```bash
+# Datasets (a few minutes on a multi-core node): data/maze-15, -1oml, -single, -unique share one test split
+python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-15
+
+# Training (~50k steps per run; GRAM, gram_single, trm, trm_minloss, trm_iexplr, trm_random, trm_unique)
+bash scripts/maze_worker.sh                    # in each GPU job; or: bash scripts/maze_compare.sh <method>
+RESUME=1 bash scripts/maze_compare.sh gram     # continue a run killed at walltime
+
+# Sampling and analysis (hidden constraints, accuracy vs samples, even sampling): results/maze_15/summary.md
+bash scripts/maze_hidden_constraints.sh
+```
+
 ## Evaluation
 
 ```bash
