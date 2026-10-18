@@ -9,4 +9,4 @@
 .idea/
 .vscode/
 *.egg-info/
-.env
+.env**/samples/
