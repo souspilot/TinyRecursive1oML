@@ -133,6 +133,20 @@ The objective is set with `arch.loss.one_of_many` (`naive | minloss | iexplr | s
 
 Every training run also saves its end-of-training weights to `checkpoints/<project>/<run>/final/checkpoint.pt`.
 
+### Hidden-constraint experiment
+
+Tests when a model's set of answers matters more than one committed answer. Each finished comparison run is sampled
+on the test split (GRAM: 100 samples per query; TRM: 1, plus a temperature-sampled MinLoss baseline), then scored on
+an unseen requirement that only some of each query's solutions meet, on accuracy vs number of samples (majority
+vote, verifier, coverage), and on accuracy by number of solutions and given queens:
+
+```bash
+bash scripts/hidden_constraints.sh 10   # results/hidden_constraints_10/summary.md and figures
+```
+
+Sampling is saved in shards (`samples/`), so rerunning after an interruption continues where it stopped, and it uses
+every visible GPU. The analysis (`scripts/analyze_nqueens_samples.py`) runs on CPU from the saved samples.
+
 ## Evaluation
 
 ```bash
