@@ -14,7 +14,8 @@
 #   trm_iexplr    TRM sampling stored paths by model likelihood       (1oML "I-ExplR")
 #
 # RESUME=1 continues an interrupted run from its latest checkpoint. SEED sets the seed (default 42).
-# KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes).
+# KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes); when set, GRAM run names include it
+# (e.g. gram_kl0.01_seed42), so a KL sweep doesn't collide with the default runs.
 #
 # Datasets (build once):
 #   python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-15
@@ -43,6 +44,9 @@ eval_interval=$(( (steps * 768 / 20 + groups / 2) / groups ))
 epochs=$(( eval_interval * 20 ))
 
 run=${method}_seed${SEED:-42}
+if [ -n "${KL_COEF}" ] && [[ ${method} == gram* ]]; then
+  run=${method}_kl${KL_COEF}_seed${SEED:-42}
+fi
 runs_dir=checkpoints/Maze-15-compare
 
 if [ -n "${RESUME}" ]; then
