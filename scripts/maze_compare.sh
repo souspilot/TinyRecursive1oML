@@ -16,6 +16,7 @@
 # RESUME=1 continues an interrupted run from its latest checkpoint. SEED sets the seed (default 42).
 # KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes); when set, GRAM run names include it
 # (e.g. gram_kl0.01_seed42), so a KL sweep doesn't collide with the default runs.
+# WANDB_OFFLINE=1 logs to W&B offline (for nodes without internet); upload later with `wandb sync`.
 #
 # Datasets (build once):
 #   python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-15
@@ -48,6 +49,8 @@ if [ -n "${KL_COEF}" ] && [[ ${method} == gram* ]]; then
   run=${method}_kl${KL_COEF}_seed${SEED:-42}
 fi
 runs_dir=checkpoints/Maze-15-compare
+
+[ -n "${WANDB_OFFLINE}" ] && arch_args="${arch_args} wandb_offline=True"
 
 if [ -n "${RESUME}" ]; then
   if [ -f "${runs_dir}/${run}/final/checkpoint.pt" ]; then
