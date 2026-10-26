@@ -7,6 +7,8 @@
 # Usage: bash scripts/maze_compare.sh <method>
 #   gram          GRAM on one random stored path per maze each epoch (up to 16 stored per maze)
 #   gram_single   GRAM on one fixed path per maze
+#   gram_budget   GRAM with a per-maze KL budget: KL up to KL_BUDGET * ln(#shortest paths) nats is free (default 1,
+#                 enough to pick one path), KL above it is weighted by KL_COEF (default 0.05 here)
 #   trm           TRM on one random stored path per maze each epoch   (1oML "Naive")
 #   trm_random    TRM on one fixed random path per maze               (1oML "Random")
 #   trm_unique    TRM on mazes with a unique shortest path only       (1oML "Unique")
@@ -19,7 +21,8 @@
 #
 # RESUME=1 continues an interrupted run from its latest checkpoint. SEED sets the seed (default 42).
 # KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes); when set, GRAM run names include it
-# (e.g. gram_kl0.01_seed42), so a KL sweep doesn't collide with the default runs.
+# (e.g. gram_kl0.01_seed42), so a KL sweep doesn't collide with the default runs. Likewise KL_BUDGET
+# (e.g. gram_budget_b0.5_seed42).
 # WANDB_OFFLINE=1 logs to W&B offline (for nodes without internet); upload later with `wandb sync`.
 #
 # Datasets (build once):
@@ -34,6 +37,9 @@ trm_args="arch=trm arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=4"
 case $method in
   gram)        data=${root}        arch_args="${gram_args}" ;;
   gram_single) data=${root}-single arch_args="${gram_args}" ;;
+  gram_budget)
+    data=${root}
+    arch_args="${gram_args/arch.kl_coef=${KL_COEF:-0.07}/arch.kl_coef=${KL_COEF:-0.05}} arch.kl_budget=${KL_BUDGET:-1.0}" ;;
   trm)         data=${root}        arch_args="${trm_args}" ;;
   trm_random)  data=${root}-single arch_args="${trm_args}" ;;
   trm_unique)  data=${root}-unique arch_args="${trm_args}" ;;
@@ -68,6 +74,9 @@ fi
 run=${method}_seed${SEED:-42}
 if [ -n "${KL_COEF}" ] && [[ ${method} == gram* ]]; then
   run=${method}_kl${KL_COEF}_seed${SEED:-42}
+fi
+if [ -n "${KL_BUDGET}" ] && [ "${method}" = gram_budget ]; then
+  run=${run%_seed*}_b${KL_BUDGET}_seed${SEED:-42}
 fi
 if [ ${rollouts} -gt 1 ] && { [ -n "${ROLLOUTS}" ] || [ -n "${NOISE_DIM}" ]; }; then
   run=${method}${ROLLOUTS:+_k${ROLLOUTS}}${NOISE_DIM:+_nd${NOISE_DIM}}_seed${SEED:-42}

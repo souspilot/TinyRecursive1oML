@@ -71,7 +71,7 @@ class TargetSelector(nn.Module):
 
 class ACTLossHead(nn.Module):
     def __init__(self, model: nn.Module, loss_type: str, kl_coef: float = 0.0, kl_balance_alpha: Optional[float] = None, free_bits: Optional[float] = None, value_coef: float = 1.0, data_path: Optional[str] = None,
-                 one_of_many: str = "naive", selectr_pretrain_steps: int = 250, selectr_hidden_size: int = 128, selectr_layers: int = 2, selectr_heads: int = 4,
+                 kl_budget: Optional[float] = None, one_of_many: str = "naive", selectr_pretrain_steps: int = 250, selectr_hidden_size: int = 128, selectr_layers: int = 2, selectr_heads: int = 4,
                  rollouts: int = 1):
         super().__init__()
         self.model = model
@@ -80,6 +80,9 @@ class ACTLossHead(nn.Module):
         self.kl_coef = kl_coef
         self.kl_balance_alpha = kl_balance_alpha  # If not None, use KL balancing (e.g., 0.8)
         self.free_bits = free_bits  # If not None, apply free bits to KL (e.g., 0.1)
+        # If not None, each example's KL is free up to kl_budget * ln(number of solutions) nats, the information
+        # needed to pick one of its solutions, and penalized above it (needs num_solutions in the dataset)
+        self.kl_budget = kl_budget
         self.value_coef = value_coef  # Coefficient for value loss
 
         # Detect task type from data_path for task-specific verification
@@ -324,16 +327,17 @@ class ACTLossHead(nn.Module):
                 metrics["kl_loss"] = kl_loss.detach()
             else:
                 def compute_kl(post_mu, post_logvar, prior_mu, prior_logvar):
+                    # Per example: summed over positions and latent dimensions
                     return torch.sum(0.5 * (
                         prior_logvar - post_logvar - 1
                         + torch.exp(post_logvar - prior_logvar)
                         + ((post_mu - prior_mu) ** 2) / torch.exp(prior_logvar)
-                    ))
+                    ), dim=tuple(range(1, post_mu.ndim)))
 
                 if self.kl_balance_alpha is not None:
                     # KL balancing: alpha * KL(sg(post) || prior) + (1-alpha) * KL(post || sg(prior))
                     alpha = self.kl_balance_alpha
-                    kl_loss = (
+                    kl_per_example = (
                         alpha * compute_kl(outputs["post_mu"].detach(), outputs["post_logvar"].detach(),
                                           outputs["prior_mu"], outputs["prior_logvar"])
                         + (1 - alpha) * compute_kl(outputs["post_mu"], outputs["post_logvar"],
@@ -341,12 +345,29 @@ class ACTLossHead(nn.Module):
                     )
                 else:
                     # Standard KL
-                    kl_loss = compute_kl(outputs["post_mu"], outputs["post_logvar"],
-                                        outputs["prior_mu"], outputs["prior_logvar"])
+                    kl_per_example = compute_kl(outputs["post_mu"], outputs["post_logvar"],
+                                                outputs["prior_mu"], outputs["prior_logvar"])
+                kl_loss = kl_per_example.sum()
+                metrics["kl_loss"] = kl_loss.detach()
+                if self.kl_budget is not None:
+                    assert "num_solutions" in new_carry.current_data, "kl_budget needs num_solutions in the dataset"
+                    # Only the posterior's side is free up to the budget; the prior's side always trains the prior
+                    # to follow the posterior, so prior samples stay usable at test time. Without KL balancing the
+                    # two sides have weight 1 each, which gives the standard KL gradient above the budget.
+                    # Padding rows have 0 solutions and get no budget
+                    alpha = self.kl_balance_alpha
+                    prior_weight, post_weight = (alpha, 1 - alpha) if alpha is not None else (1.0, 1.0)
+                    kl_prior_side = compute_kl(outputs["post_mu"].detach(), outputs["post_logvar"].detach(),
+                                               outputs["prior_mu"], outputs["prior_logvar"])
+                    kl_post_side = compute_kl(outputs["post_mu"], outputs["post_logvar"],
+                                              outputs["prior_mu"].detach(), outputs["prior_logvar"].detach())
+                    budget = self.kl_budget * torch.log(new_carry.current_data["num_solutions"].clamp_min(1).to(kl_post_side.dtype))
+                    over_budget = torch.relu(kl_post_side - budget)
+                    kl_loss = (prior_weight * kl_prior_side + post_weight * over_budget).sum()
+                    metrics["kl_over_budget_loss"] = over_budget.sum().detach()
                 # Apply free bits if specified (per sample)
                 if self.free_bits is not None:
                     kl_loss = torch.clamp(kl_loss, min=self.free_bits)
-                metrics["kl_loss"] = kl_loss.detach()
 
         # Value loss (if value head is enabled)
         value_loss = 0
