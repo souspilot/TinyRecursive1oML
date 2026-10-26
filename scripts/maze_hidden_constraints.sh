@@ -4,7 +4,8 @@
 # Usage: bash scripts/maze_hidden_constraints.sh
 #
 # 1. Samples every finished run in checkpoints/Maze-15-compare/ on the test split of data/maze-15-1oml:
-#    GRAM runs get GRAM_SAMPLES samples per maze (default 100); TRM runs, deterministic, get 1. Runs listed in
+#    Stochastic runs (GRAM, and noisy TRM: trm_setmatch, trm_noise_minloss) get GRAM_SAMPLES samples per maze
+#    (default 100); other TRM runs, deterministic, get 1. Runs listed in
 #    TEMPERATURE_RUNS (default trm_minloss_seed42) are also sampled GRAM_SAMPLES times at TEMPERATURE (default 1.0).
 # 2. Analyzes all samples into results/maze_15/ (scripts/analyze_maze_samples.py).
 #
@@ -52,7 +53,7 @@ for run_dir in "${runs_dir}"/*/; do
     ckpt=${last}checkpoint.pt
   fi
 
-  if [[ ${run} == gram* ]]; then
+  if [[ ${run} == gram* || ${run} == trm_setmatch* || ${run} == trm_noise* ]]; then
     sample "${run}" "${ckpt}" ${gram_samples} 0 || failed+=("${run}")
   else
     sample "${run}" "${ckpt}" 1 0 || failed+=("${run}")

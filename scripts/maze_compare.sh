@@ -12,6 +12,10 @@
 #   trm_unique    TRM on mazes with a unique shortest path only       (1oML "Unique")
 #   trm_minloss   TRM trained towards the closest stored path         (1oML "MinLoss")
 #   trm_iexplr    TRM sampling stored paths by model likelihood       (1oML "I-ExplR")
+#   trm_setmatch  noisy TRM: ROLLOUTS rollouts per maze (default 4), each with its own random vector
+#                 (NOISE_DIM, default 32), matched one to one to the maze's stored paths
+#   trm_noise_minloss  same noisy rollouts, each trained towards its closest stored path (ablation: no matching)
+#   When ROLLOUTS or NOISE_DIM is set, run names include it (e.g. trm_setmatch_k8_nd64_seed42).
 #
 # RESUME=1 continues an interrupted run from its latest checkpoint. SEED sets the seed (default 42).
 # KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes); when set, GRAM run names include it
@@ -35,18 +39,38 @@ case $method in
   trm_unique)  data=${root}-unique arch_args="${trm_args}" ;;
   trm_minloss) data=${root}-1oml   arch_args="${trm_args} arch.loss.one_of_many=minloss" ;;
   trm_iexplr)  data=${root}-1oml   arch_args="${trm_args} arch.loss.one_of_many=iexplr" ;;
+  trm_setmatch|trm_noise_minloss)
+    rollouts=${ROLLOUTS:-4}
+    objective=setmatch
+    [ "${method}" = trm_noise_minloss ] && objective=minloss
+    data=${root}-1oml
+    arch_args="${trm_args} arch.noise_dim=${NOISE_DIM:-32} arch.loss.one_of_many=${objective} +rollouts=${rollouts}" ;;
   *) echo "Unknown method: ${method}"; exit 1 ;;
 esac
 
-# 20 evaluation rounds of eval_interval epochs, about ${steps} steps of 768 mazes in total
+# 20 evaluation rounds of eval_interval epochs, about ${steps} steps of 768 sequences in total. With several
+# rollouts per maze, each step covers 768 / rollouts mazes, so the same steps take more epochs.
+rollouts=${rollouts:-1}
+mazes_per_step=$(( 768 / rollouts ))
 groups=$(python -c "import json, sys; print(json.load(open(sys.argv[1]))['total_groups'])" "${data}/train/dataset.json")
-eval_interval=$(( (steps * 768 / 20 + groups / 2) / groups ))
+eval_interval=$(( (steps * mazes_per_step / 20 + groups / 2) / groups ))
 [ ${eval_interval} -lt 1 ] && eval_interval=1
 epochs=$(( eval_interval * 20 ))
+if [ ${rollouts} -gt 1 ]; then
+  # Epochs are few here, so rounding to exactly 20 rounds would miss the step budget by several percent:
+  # take the epoch count closest to it, evaluated about every 1/20 of it (largest divisor up to that)
+  epochs=$(( (steps * mazes_per_step + groups / 2) / groups ))
+  eval_interval=$(( epochs / 20 ))
+  [ ${eval_interval} -lt 1 ] && eval_interval=1
+  while [ $(( epochs % eval_interval )) -ne 0 ]; do eval_interval=$(( eval_interval - 1 )); done
+fi
 
 run=${method}_seed${SEED:-42}
 if [ -n "${KL_COEF}" ] && [[ ${method} == gram* ]]; then
   run=${method}_kl${KL_COEF}_seed${SEED:-42}
+fi
+if [ ${rollouts} -gt 1 ] && { [ -n "${ROLLOUTS}" ] || [ -n "${NOISE_DIM}" ]; }; then
+  run=${method}${ROLLOUTS:+_k${ROLLOUTS}}${NOISE_DIM:+_nd${NOISE_DIM}}_seed${SEED:-42}
 fi
 runs_dir=checkpoints/Maze-15-compare
 

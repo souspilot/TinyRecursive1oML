@@ -17,6 +17,7 @@ IGNORE_LABEL_ID = -100
 class TinyRecursiveReasoningModel_ACTV1InnerCarry:
     z_H: torch.Tensor
     z_L: torch.Tensor
+    noise: Optional[torch.Tensor] = None  # Per-rollout random vector (noise_dim > 0), fixed until the rollout halts
 
 
 @dataclass
@@ -70,6 +71,10 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
 
     # Sampled initialization (instead of fixed)
     sample_init: bool = False  # If True, sample initial states from learned distribution
+
+    # Noise conditioning: a random vector drawn per rollout when it starts, projected and added to the input
+    # at every recursion step, so the model can use it to choose among solutions (0 = off)
+    noise_dim: int = 0
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -145,6 +150,9 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
 
         self.q_head = CastedLinear(self.config.hidden_size, 2, bias=True)
 
+        if self.config.noise_dim > 0:
+            self.noise_proj = CastedLinear(self.config.noise_dim, self.config.hidden_size, bias=False)
+
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
         if self.config.puzzle_emb_ndim > 0:
             # Zero init puzzle embeddings
@@ -202,9 +210,17 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
             z_H=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
             z_L=torch.empty(batch_size, self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
+            noise=torch.empty(batch_size, self.config.noise_dim, dtype=self.forward_dtype) if self.config.noise_dim > 0 else None,
         )
-        
+
     def reset_carry(self, reset_flag: torch.Tensor, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry):
+        new_carry = self._reset_states(reset_flag, carry)
+        if self.config.noise_dim > 0:
+            fresh = torch.randn(reset_flag.shape[0], self.config.noise_dim, dtype=self.forward_dtype, device=reset_flag.device)
+            new_carry.noise = torch.where(reset_flag.view(-1, 1), fresh, carry.noise)
+        return new_carry
+
+    def _reset_states(self, reset_flag: torch.Tensor, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry):
         if self.config.sample_init:
             # Sample fresh N(0,1) for each sequence being reset
             batch_size = reset_flag.shape[0]
@@ -231,6 +247,8 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
 
         # Input encoding
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        if self.config.noise_dim > 0:
+            input_embeddings = input_embeddings + self.noise_proj(carry.noise).unsqueeze(1)
 
         # Forward iterations
         it = 0
@@ -247,7 +265,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         z_H = self.L_level(z_H, z_L, **seq_info)
 
         # LM Outputs
-        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(z_H=z_H.detach(), z_L=z_L.detach())  # New carry no grad
+        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(z_H=z_H.detach(), z_L=z_L.detach(), noise=carry.noise)  # New carry no grad
         logits = self.lm_head(z_H)[:, self.puzzle_emb_len:]
 
         # Apply temperature scaling during inference only
