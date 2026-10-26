@@ -165,6 +165,16 @@ RESUME=1 bash scripts/maze_compare.sh gram     # continue a run killed at wallti
 bash scripts/maze_hidden_constraints.sh
 ```
 
+Noisy TRM with set matching (`trm_setmatch`): each maze gets several rollouts (`ROLLOUTS`, default 4), each with its
+own random vector fed to every recursion step (`arch.noise_dim`), and the rollouts are matched one to one to the
+maze's stored paths, so the model learns to use the noise to choose a solution. `trm_noise_minloss` is the ablation
+without matching. Both keep the ~50k-step budget (the batch still holds 768 sequences) and are sampled 100 times.
+
+```bash
+bash scripts/maze_compare.sh trm_setmatch        # watch train/rollout_distinct: 1/ROLLOUTS means the noise is ignored
+bash scripts/maze_compare.sh trm_noise_minloss
+```
+
 ## Evaluation
 
 ```bash

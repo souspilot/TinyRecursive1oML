@@ -48,6 +48,7 @@ class PuzzleDatasetConfig(pydantic.BaseModel):
     epochs_per_iter: int  # Batch X epochs in an iteration to reduce overhead.
     rank: int
     num_replicas: int
+    rollouts: int = 1  # Training only: each sampled example appears this many times in a row (global_batch_size counts them)
 
 class PuzzleDataset(IterableDataset):
     def __init__(self, config: PuzzleDatasetConfig, split: str = "train"):
@@ -107,6 +108,7 @@ class PuzzleDataset(IterableDataset):
         # Checks
         assert self.config.global_batch_size % self.config.num_replicas == 0, f"Global batch size {self.config.global_batch_size} must be multiples of nodes {self.config.num_replicas}."
         self.local_batch_size = self.config.global_batch_size // self.config.num_replicas
+        assert self.local_batch_size % self.config.rollouts == 0, f"Per-process batch {self.local_batch_size} must be a multiple of rollouts {self.config.rollouts}."
 
         # State
         self._data = None
@@ -226,6 +228,7 @@ class PuzzleDataset(IterableDataset):
             group_order = np.concatenate([rng.permutation(dataset["group_indices"].size - 1) for _i in range(self.config.epochs_per_iter)])
             start_index = 0
             
+            rollouts = self.config.rollouts
             while start_index < group_order.size:
                 start_index, batch_indices, batch_puzzle_indices = _sample_batch(
                     rng,
@@ -233,15 +236,19 @@ class PuzzleDataset(IterableDataset):
                     puzzle_indices=dataset["puzzle_indices"],
                     group_indices=dataset["group_indices"],
                     start_index=start_index,
-                    global_batch_size=self.config.global_batch_size,
+                    global_batch_size=self.config.global_batch_size // rollouts,
                 )
+
+                # Drop last batch
+                if batch_puzzle_indices.size < self.config.global_batch_size // rollouts:
+                    break
+
+                # Each example's rollouts sit next to each other
+                batch_indices = np.repeat(batch_indices, rollouts)
+                batch_puzzle_indices = np.repeat(batch_puzzle_indices, rollouts)
 
                 # Select current rank and collate
                 global_effective_batch_size = batch_puzzle_indices.size  # Global effective batch size, excluding pads
-
-                # Drop last batch
-                if global_effective_batch_size < self.config.global_batch_size:
-                    break
 
                 batch_indices        = batch_indices       [self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]
                 batch_puzzle_indices = batch_puzzle_indices[self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]

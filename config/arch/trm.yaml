@@ -37,3 +37,7 @@ use_mlp_lm_head: False # Use MLP decoder (SwiGLU) instead of linear projection
 
 # Sampled initialization
 sample_init: False # If True, sample fresh N(0,1) initial states at each forward pass
+
+# Noise conditioning: a random vector per rollout, drawn when it starts on an example, projected and added to the
+# input at every recursion step (0 = off). Used with rollouts > 1 and one_of_many=setmatch.
+noise_dim: 0

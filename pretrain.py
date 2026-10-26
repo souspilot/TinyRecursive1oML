@@ -75,6 +75,7 @@ class PretrainConfig(pydantic.BaseModel):
     run_name: Optional[str] = None
     load_checkpoint: Optional[str] = None
     resume: bool = False  # With load_checkpoint: also restore optimizer state and step, and continue the run from there
+    rollouts: int = 1  # Training rollouts per example, side by side in the batch (global_batch_size counts rollouts)
     checkpoint_path: Optional[str] = None
 
     # Extras
@@ -142,6 +143,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         # Pass data_path for task-specific verification
         loss_kwargs = dict(config.arch.loss.__pydantic_extra__)  # type: ignore
         loss_kwargs['data_path'] = config.data_paths[0] if config.data_paths else None
+        loss_kwargs['rollouts'] = config.rollouts
         model = loss_head_cls(model, **loss_kwargs)
         if "DISABLE_COMPILE" not in os.environ:
             model = torch.compile(model)  # type: ignore
@@ -228,7 +230,7 @@ def cosine_schedule_with_warmup_lr_lambda(
 
 def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
     # Estimated total training steps (dataloader samples 1 random sample per group per epoch)
-    total_steps = int(config.epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples / config.global_batch_size)
+    total_steps = int(config.epochs * train_metadata.total_groups * train_metadata.mean_puzzle_examples * config.rollouts / config.global_batch_size)
 
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, rank=rank, world_size=world_size)
@@ -635,7 +637,7 @@ def launch(hydra_config: DictConfig):
 
     assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
 
-    train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+    train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, rollouts=config.rollouts)
     try:
         eval_loader,  eval_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
     except:
@@ -690,7 +692,7 @@ def launch(hydra_config: DictConfig):
             start_iter = checkpoint['iters_done']
         else:
             # Older checkpoints: every eval interval is the same number of steps (one example per group)
-            steps_per_iter = train_epochs_per_iter * train_metadata.total_groups // config.global_batch_size
+            steps_per_iter = train_epochs_per_iter * train_metadata.total_groups // (config.global_batch_size // config.rollouts)
             if train_state.step % steps_per_iter != 0:
                 raise ValueError(f"Can't tell which eval interval step {train_state.step} ends ({steps_per_iter} steps each)")
             start_iter = train_state.step // steps_per_iter

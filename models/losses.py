@@ -1,5 +1,6 @@
 from typing import Any, Tuple, Dict, Sequence, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -42,7 +43,7 @@ def token_log_probs(logits, loss_type: str):
     return F.log_softmax(logits.to(torch.float32), dim=-1)
 
 
-ONE_OF_MANY_METHODS = ("naive", "minloss", "iexplr", "selectr")
+ONE_OF_MANY_METHODS = ("naive", "minloss", "iexplr", "selectr", "setmatch")
 
 
 class TargetSelector(nn.Module):
@@ -70,7 +71,8 @@ class TargetSelector(nn.Module):
 
 class ACTLossHead(nn.Module):
     def __init__(self, model: nn.Module, loss_type: str, kl_coef: float = 0.0, kl_balance_alpha: Optional[float] = None, free_bits: Optional[float] = None, value_coef: float = 1.0, data_path: Optional[str] = None,
-                 one_of_many: str = "naive", selectr_pretrain_steps: int = 250, selectr_hidden_size: int = 128, selectr_layers: int = 2, selectr_heads: int = 4):
+                 one_of_many: str = "naive", selectr_pretrain_steps: int = 250, selectr_hidden_size: int = 128, selectr_layers: int = 2, selectr_heads: int = 4,
+                 rollouts: int = 1):
         super().__init__()
         self.model = model
         self.loss_type = loss_type
@@ -97,6 +99,9 @@ class ACTLossHead(nn.Module):
         assert one_of_many in ONE_OF_MANY_METHODS, f"one_of_many must be one of {ONE_OF_MANY_METHODS}, got {one_of_many}"
         self.one_of_many = one_of_many
         self.selectr_pretrain_steps = selectr_pretrain_steps
+        # Training rollouts per example, side by side in the batch (pretrain's `rollouts`). setmatch spreads an
+        # example's rollouts over its stored solutions, one to one, as evenly as possible
+        self.rollouts = rollouts
         if one_of_many == "selectr":
             self.selector = TargetSelector(model.config.vocab_size, model.config.seq_len,
                                            selectr_hidden_size, selectr_layers, selectr_heads)
@@ -115,6 +120,27 @@ class ACTLossHead(nn.Module):
         counts = mask.sum(-1)
         losses = -torch.where(mask, target_logprobs, 0).sum(-1) / counts.clamp_min(1)
         return losses, counts, counts > 0
+
+    @torch.compiler.disable
+    def setmatch_weights(self, target_losses: torch.Tensor, target_valid: torch.Tensor) -> torch.Tensor:
+        """Assign each example's rollouts to its stored solutions with minimum total loss (Hungarian matching).
+
+        Solutions are repeated as often as needed to cover all rollouts, so with fewer solutions than rollouts
+        every solution gets a rollout, and with one solution all rollouts go to it. Returns (B, K) one-hot weights."""
+        from scipy.optimize import linear_sum_assignment
+
+        k = self.rollouts
+        costs = target_losses.detach().to(torch.float32).cpu().numpy()
+        valid = target_valid.cpu().numpy()
+        weights = np.zeros(costs.shape, dtype=np.float32)
+        for start in range(0, costs.shape[0], k):
+            solutions = np.where(valid[start])[0]  # the rollouts of an example share its stored solutions
+            if len(solutions) == 0:
+                continue
+            columns = np.tile(solutions, -(-k // len(solutions)))
+            rows, picked = linear_sum_assignment(costs[start:start + k][:, columns])
+            weights[start + rows, columns[picked]] = 1
+        return torch.from_numpy(weights).to(device=target_losses.device, dtype=target_losses.dtype)
 
     @torch.compiler.disable
     def selectr_weights(self, inputs, logits, preds, label_set, target_valid, minloss_weights):
@@ -161,6 +187,11 @@ class ACTLossHead(nn.Module):
         new_carry, outputs = self.model(**model_kwargs)
         labels = new_carry.current_data["labels"]
 
+        # An example's rollouts sit next to each other in the batch; halting them together keeps them aligned,
+        # since a halted position is refilled with the batch row at that position
+        if self.training and self.rollouts > 1:
+            new_carry.halted = new_carry.halted.view(-1, self.rollouts).all(-1).repeat_interleave(self.rollouts)
+
         # One-of-many: pick the target(s) to train on among the input's solutions
         target_weights = None
         selector_loss = 0
@@ -175,6 +206,8 @@ class ACTLossHead(nn.Module):
                 minloss_weights = F.one_hot(torch.where(target_valid, target_losses, torch.inf).argmin(-1), label_set.shape[1]).to(target_losses.dtype)
                 if not self.training or self.one_of_many == "minloss":
                     target_weights = minloss_weights
+                elif self.one_of_many == "setmatch":
+                    target_weights = self.setmatch_weights(target_losses, target_valid)
                 elif self.one_of_many == "iexplr":
                     # Sample a target with the probability the model assigns to it (Gumbel-max)
                     log_likelihood = torch.where(target_valid, -target_losses * target_counts, -torch.inf)
@@ -254,6 +287,14 @@ class ACTLossHead(nn.Module):
 
             for k, v in selector_metrics.items():
                 metrics[k] = torch.where(valid_metrics, v, 0).sum()
+
+            # Share of an example's rollouts that give distinct answers (1/rollouts = the noise is ignored)
+            if self.training and self.rollouts > 1:
+                grouped = preds.view(-1, self.rollouts, preds.shape[-1])
+                same = (grouped.unsqueeze(2) == grouped.unsqueeze(1)).all(-1)
+                earlier = torch.tril(torch.ones(self.rollouts, self.rollouts, dtype=torch.bool, device=preds.device), diagonal=-1)
+                distinct = self.rollouts - (same & earlier).any(-1).sum(-1)
+                metrics["rollout_distinct"] = torch.where(valid_metrics, (distinct.float() / self.rollouts).repeat_interleave(self.rollouts), 0).sum()
 
         # Losses
         if target_weights is None:
