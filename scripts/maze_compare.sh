@@ -22,7 +22,8 @@
 # RESUME=1 continues an interrupted run from its latest checkpoint. SEED sets the seed (default 42).
 # KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes); when set, GRAM run names include it
 # (e.g. gram_kl0.01_seed42), so a KL sweep doesn't collide with the default runs. Likewise KL_BUDGET
-# (e.g. gram_budget_b0.5_seed42).
+# (e.g. gram_budget_b0.5_seed42). STEPS sets the training length (default ~50000); when set, run names include it
+# (e.g. gram_kl0.015_steps100000_seed42).
 # WANDB_OFFLINE=1 logs to W&B offline (for nodes without internet); upload later with `wandb sync`.
 #
 # Datasets (build once):
@@ -80,6 +81,9 @@ if [ -n "${KL_BUDGET}" ] && [ "${method}" = gram_budget ]; then
 fi
 if [ ${rollouts} -gt 1 ] && { [ -n "${ROLLOUTS}" ] || [ -n "${NOISE_DIM}" ]; }; then
   run=${method}${ROLLOUTS:+_k${ROLLOUTS}}${NOISE_DIM:+_nd${NOISE_DIM}}_seed${SEED:-42}
+fi
+if [ -n "${STEPS}" ]; then
+  run=${run%_seed*}_steps${STEPS}_seed${SEED:-42}
 fi
 runs_dir=checkpoints/Maze-15-compare
 
