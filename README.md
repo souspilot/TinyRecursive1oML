@@ -175,6 +175,16 @@ bash scripts/maze_compare.sh trm_setmatch        # watch train/rollout_distinct:
 bash scripts/maze_compare.sh trm_noise_minloss
 ```
 
+GRAM with a per-maze KL budget (`gram_budget`): one KL weight can't suit both mazes with one shortest path (the
+latent should carry nothing) and mazes with hundreds (it must pick one). With `arch.kl_budget=b`, a maze's posterior
+KL is free up to b·ln(number of shortest paths) nats, the information needed to pick one path, and weighted by
+`kl_coef` above it; the prior always learns to follow the posterior. It needs `num_solutions` at training time only.
+
+```bash
+bash scripts/maze_compare.sh gram_budget                # KL_COEF=0.05, KL_BUDGET=1.0 by default
+KL_BUDGET=3 bash scripts/maze_compare.sh gram_budget    # run name gram_budget_b3_seed42
+```
+
 ## Evaluation
 
 ```bash
