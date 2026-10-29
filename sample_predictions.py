@@ -20,6 +20,7 @@ import argparse
 import json
 import math
 import os
+import sys
 
 import numpy as np
 import torch
@@ -65,6 +66,12 @@ def make_batch(data, metadata: PuzzleDatasetMetadata, start: int, end: int):
 
 def load_model(checkpoint_path: str, metadata: PuzzleDatasetMetadata, temperature: float, device: str):
     """Build the model with its loss head and load its EMA weights, as eval_pass_at_k.py does."""
+    # Checkpoints pickle these classes as defined in __main__ (pretrain.py); make them findable there whichever
+    # script is running
+    main_module = sys.modules["__main__"]
+    for cls in (PretrainConfig, ArchConfig, LossConfig, EvaluatorConfig):
+        if not hasattr(main_module, cls.__name__):
+            setattr(main_module, cls.__name__, cls)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
     model_cfg = dict(
