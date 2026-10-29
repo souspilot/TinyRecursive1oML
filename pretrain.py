@@ -76,6 +76,7 @@ class PretrainConfig(pydantic.BaseModel):
     load_checkpoint: Optional[str] = None
     resume: bool = False  # With load_checkpoint: also restore optimizer state and step, and continue the run from there
     rollouts: int = 1  # Training rollouts per example, side by side in the batch (global_batch_size counts rollouts)
+    path_hints: float = 0.0  # Mazes: share of training examples whose input reveals part of the target path
     checkpoint_path: Optional[str] = None
 
     # Extras
@@ -637,7 +638,7 @@ def launch(hydra_config: DictConfig):
 
     assert config.epochs % train_epochs_per_iter == 0, "Eval interval must be a divisor of total epochs."
 
-    train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, rollouts=config.rollouts)
+    train_loader, train_metadata = create_dataloader(config, "train", test_set_mode=False, epochs_per_iter=train_epochs_per_iter, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE, rollouts=config.rollouts, path_hints=config.path_hints)
     try:
         eval_loader,  eval_metadata  = create_dataloader(config, "test", test_set_mode=True, epochs_per_iter=1, global_batch_size=config.global_batch_size, rank=RANK, world_size=WORLD_SIZE)
     except:

@@ -17,12 +17,15 @@
 #   trm_setmatch  noisy TRM: ROLLOUTS rollouts per maze (default 4), each with its own random vector
 #                 (NOISE_DIM, default 32), matched one to one to the maze's stored paths
 #   trm_noise_minloss  same noisy rollouts, each trained towards its closest stored path (ablation: no matching)
+#   trm_hints     TRM as `trm`, but a share PATH_HINTS (default 0.75) of training inputs reveal part of the target
+#                 path (a prefix or a random subset), so the model can be decoded one step at a time (walk_decode.py)
 #   When ROLLOUTS or NOISE_DIM is set, run names include it (e.g. trm_setmatch_k8_nd64_seed42).
 #
 # RESUME=1 continues an interrupted run from its latest checkpoint. SEED sets the seed (default 42).
 # KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes); when set, GRAM run names include it
 # (e.g. gram_kl0.01_seed42), so a KL sweep doesn't collide with the default runs. Likewise KL_BUDGET
-# (e.g. gram_budget_b0.5_seed42).
+# (e.g. gram_budget_b0.5_seed42). STEPS sets the training length (default ~50000); when set, run names include it
+# (e.g. gram_kl0.015_steps100000_seed42).
 # WANDB_OFFLINE=1 logs to W&B offline (for nodes without internet); upload later with `wandb sync`.
 #
 # Datasets (build once):
@@ -45,6 +48,7 @@ case $method in
   trm_unique)  data=${root}-unique arch_args="${trm_args}" ;;
   trm_minloss) data=${root}-1oml   arch_args="${trm_args} arch.loss.one_of_many=minloss" ;;
   trm_iexplr)  data=${root}-1oml   arch_args="${trm_args} arch.loss.one_of_many=iexplr" ;;
+  trm_hints)   data=${root}        arch_args="${trm_args} +path_hints=${PATH_HINTS:-0.75}" ;;
   trm_setmatch|trm_noise_minloss)
     rollouts=${ROLLOUTS:-4}
     objective=setmatch
@@ -80,6 +84,12 @@ if [ -n "${KL_BUDGET}" ] && [ "${method}" = gram_budget ]; then
 fi
 if [ ${rollouts} -gt 1 ] && { [ -n "${ROLLOUTS}" ] || [ -n "${NOISE_DIM}" ]; }; then
   run=${method}${ROLLOUTS:+_k${ROLLOUTS}}${NOISE_DIM:+_nd${NOISE_DIM}}_seed${SEED:-42}
+fi
+if [ -n "${PATH_HINTS}" ] && [ "${method}" = trm_hints ]; then
+  run=${run%_seed*}_h${PATH_HINTS}_seed${SEED:-42}
+fi
+if [ -n "${STEPS}" ]; then
+  run=${run%_seed*}_steps${STEPS}_seed${SEED:-42}
 fi
 runs_dir=checkpoints/Maze-15-compare
 

@@ -185,6 +185,34 @@ bash scripts/maze_compare.sh gram_budget                # KL_COEF=0.05, KL_BUDGE
 KL_BUDGET=3 bash scripts/maze_compare.sh gram_budget    # run name gram_budget_b3_seed42
 ```
 
+### Deciding one step at a time (walk decoding)
+
+A model trained on one random path per maze (`trm`) learns the share of shortest paths through each cell, but
+marking every cell at once blends paths. `walk_decode.py` instead walks from the start, one step at a time,
+choosing each step by the model's probabilities and feeding the steps taken back as input. With exact shares
+this samples shortest paths uniformly; the model is re-run only at uncertain steps (about one pass per fork).
+`--mode start` moves the start token to the walker (works with any maze model); `--mode hint` marks the walked cells
+as PATH, for models trained with path hints (`trm_hints`). `--choice greedy` gives one deterministic answer.
+
+```bash
+bash scripts/maze_compare.sh trm_hints                  # TRM trained with partial paths revealed in its inputs
+torchrun --nproc-per-node 1 walk_decode.py --checkpoint checkpoints/Maze-15-compare/trm_seed42/final/checkpoint.pt \
+  --data data/maze-15-1oml --out samples/maze_15/trm_seed42_walk --num_samples 100 --mode start --choice sample
+python scripts/maze_marginals.py --data data/maze-15-1oml --out results/maze_15/marginals \
+  --runs trm_seed42=checkpoints/Maze-15-compare/trm_seed42/final/checkpoint.pt   # probabilities vs exact shares
+```
+
+`sample_predictions.py` also saves each sample's halting logit (the model's own estimate that it is right; the
+analysis reports best-of-K picked by it), and takes `--latent_noise` (Gaussian noise on the latent state at each
+recursion step, as in the Probabilistic Tiny Recursive Model) and `--halt_steps` (more recursion at test time).
+
+All of these experiments run from one queue, one worker per GPU, in any number of jobs:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/maze_h2_smoke.sh     # a few minutes: checks the pipeline end to end
+CUDA_VISIBLE_DEVICES=0 bash scripts/maze_h2_worker.sh 2>&1 | tee -a logs/maze_h2_worker_$(hostname)_0.log
+```
+
 ## Evaluation
 
 ```bash
