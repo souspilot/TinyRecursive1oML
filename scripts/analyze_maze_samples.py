@@ -17,6 +17,8 @@ exact shortest paths (evaluators/maze_utils.py): a sample is valid when it marks
    same number of paths. A ratio near 1 means paths are sampled about as evenly as uniformly at random.
 4. First-sample accuracy by number of shortest paths and by path length.
 5. Variety on unique-path mazes: distinct answers among the samples, and share of valid samples.
+6. Compute and self-verification: model passes per sample (1 for one-shot sampling; walk_decode.py records its
+   own), and best-of-K picked by the model's halting logit, for runs whose shards saved it.
 
 Writes <out>/<run>.json, <out>/summary.md and figures (if matplotlib is installed).
 """
@@ -40,16 +42,18 @@ EVEN_SAMPLING_MIN_VALID = 20
 
 
 def load_run(run_dir):
-    """Samples of one run as (mazes, samples, seq_len), or None if shards are missing."""
+    """Samples of one run as (mazes, samples, seq_len), or None if shards are missing; also its meta and the
+    per-sample extras every shard saved (`q`: halting logits, `passes`: model passes)."""
     with open(os.path.join(run_dir, "meta.json")) as f:
         meta = json.load(f)
     paths = [os.path.join(run_dir, f"shard_{i:05d}.npz") for i in range(meta["num_shards"])]
     missing = [p for p in paths if not os.path.exists(p)]
     if missing:
         print(f"Skipping {run_dir}: {len(missing)} of {len(paths)} shards missing (sampling unfinished)")
-        return None, meta
+        return None, meta, {}
     shards = sorted((np.load(p) for p in paths), key=lambda s: int(s["query_start"]))
-    return np.concatenate([s["preds"] for s in shards]), meta
+    extras = {k: np.concatenate([s[k] for s in shards]) for k in ("q", "passes") if all(k in s for s in shards)}
+    return np.concatenate([s["preds"] for s in shards]), meta, extras
 
 
 def verify_all(inputs, preds, chunk=20000):
@@ -153,7 +157,8 @@ def bucket_name(lo, hi):
     return str(lo) if lo == hi else f"{lo}+" if hi >= 10**9 else f"{lo}-{hi}"
 
 
-def analyze_run(preds, inputs, stats, rng):
+def analyze_run(preds, inputs, stats, rng, extras=None):
+    extras = extras or {}
     num_samples = preds.shape[1]
     sample_counts = [k for k in SAMPLE_COUNTS if k <= num_samples]
     valid = verify_all(inputs, preds)
@@ -179,8 +184,18 @@ def analyze_run(preds, inputs, stats, rng):
                                        "first_sample_accuracy": float(first[(lengths >= lo) & (lengths <= hi)].mean())}
                  for lo, hi in LENGTH_BUCKETS if ((lengths >= lo) & (lengths <= hi)).any()}
 
+    best_q = None
+    if "q" in extras:
+        best_q = {}
+        for k in sample_counts:
+            pick = extras["q"][:, :k].argmax(1)
+            chosen = valid[np.arange(len(stats)), pick]
+            best_q[str(k)] = {name: float(chosen[mask].mean()) for name, mask in subsets.items() if mask.any()}
+
     unique = num_paths == 1
     return {
+        "passes_per_sample": float(extras["passes"].mean()) if "passes" in extras else 1.0,
+        "best_q": best_q,
         "num_samples": num_samples,
         "num_mazes": len(stats),
         "by_samples": by_samples,
@@ -250,6 +265,17 @@ def write_summary(results, out_dir):
         if v:
             lines.append(f"| {n} | {results[n]['num_samples']} | {v['distinct_answers']:.2f} | {pct(v['valid_sample_share'])} |")
 
+    counts = [k for k in ("1", "5", "20", "100") if any(k in (results[n]["best_q"] or {}) for n in names)]
+    lines += ["", "## Compute and self-verification", "",
+              "Model passes per sample (each pass runs the full recursion), and accuracy when the sample with the highest "
+              "halting logit among the first K is picked (no external checker).", "",
+              "| run | passes per sample | " + " | ".join(f"best-Q @{k}" for k in counts) + " |",
+              "|" + "---|" * (2 + len(counts))]
+    for n in names:
+        bq = results[n].get("best_q") or {}
+        lines.append(f"| {n} | {results[n].get('passes_per_sample', 1.0):.2f} | "
+                     + " | ".join(pct(bq[k]["all"]) if k in bq else "-" for k in counts) + " |")
+
     with open(os.path.join(out_dir, "summary.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
@@ -314,12 +340,13 @@ def main():
     results = {}
     for meta_path in sorted(glob.glob(os.path.join(args.samples, "*", "meta.json"))):
         run_dir = os.path.dirname(meta_path)
-        preds, meta = load_run(run_dir)
+        preds, meta, extras = load_run(run_dir)
         if preds is None:
             continue
         name = os.path.basename(run_dir)
         print(f"Analyzing {name} ({preds.shape[1]} samples per maze)")
-        results[name] = {"meta": meta, **analyze_run(preds, inputs, stats, np.random.default_rng(args.seed))}
+        results[name] = {"meta": meta, **analyze_run(preds, inputs[:len(preds)], stats[:len(preds)],
+                                                     np.random.default_rng(args.seed), extras)}
         with open(os.path.join(args.out, f"{name}.json"), "w") as f:
             json.dump(results[name], f, indent=2)
     if not results:

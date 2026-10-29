@@ -94,6 +94,53 @@ class ShortestPaths:
         return label
 
 
+def _spread_np(mask: np.ndarray) -> np.ndarray:
+    """Cells 4-adjacent to any cell of mask, for a (B, n, n) numpy bool array."""
+    out = np.zeros_like(mask)
+    out[:, 1:] |= mask[:, :-1]
+    out[:, :-1] |= mask[:, 1:]
+    out[:, :, 1:] |= mask[:, :, :-1]
+    out[:, :, :-1] |= mask[:, :, 1:]
+    return out
+
+
+def path_order(grids: np.ndarray, path: np.ndarray) -> np.ndarray:
+    """Steps from start along each marked path, for (B, n, n) token grids and PATH masks; -1 off the path.
+
+    A shortest path is a simple chain, so flooding from start through its cells numbers them in order."""
+    order = np.where(grids == START, 0, -1)
+    frontier = reached = grids == START
+    step = 0
+    while True:
+        step += 1
+        frontier = _spread_np(frontier) & path & ~reached
+        if not frontier.any():
+            return order
+        order[frontier] = step
+        reached = reached | frontier
+
+
+def add_path_hints(inputs: np.ndarray, labels: np.ndarray, rng: np.random.Generator, prob: float) -> np.ndarray:
+    """Reveal part of each example's target path in its input, as PATH cells, with probability prob.
+
+    Half of the hinted examples get a prefix of the path from the start (what a decoder walking from the start
+    feeds back), half a random subset of its cells (any-order decoding). The revealed share is uniform in [0, 1).
+    All shortest paths have the same length, so given the hints the target is uniform over the stored paths
+    that contain them. inputs, labels: (B, n*n) token arrays. Returns new inputs."""
+    b, seq_len = inputs.shape
+    n = int(round(seq_len ** 0.5))
+    path = labels == PATH
+    hinted = rng.random(b) < prob
+    if not hinted.any():
+        return inputs
+    share = rng.random(b)[:, None]
+    order = path_order(inputs.reshape(b, n, n), path.reshape(b, n, n)).reshape(b, seq_len)
+    prefix = path & (order >= 1) & (order <= share * order.max(1, keepdims=True))
+    subset = path & (rng.random((b, seq_len)) < share)
+    hints = hinted[:, None] & np.where((rng.random(b) < 0.5)[:, None], prefix, subset)
+    return np.where(hints, PATH, inputs).astype(inputs.dtype)
+
+
 def _spread(mask: torch.Tensor) -> torch.Tensor:
     """Cells 4-adjacent to any cell of mask."""
     out = torch.zeros_like(mask)
