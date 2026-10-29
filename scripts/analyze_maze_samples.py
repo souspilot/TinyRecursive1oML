@@ -298,7 +298,7 @@ def plot(results, out_dir):
     ax.plot(x, [hc0["best_single_path"][b] for b in keep], "k:", label="best single path")
     for n in names:
         success = results[n]["hidden_constraints"]["success"]
-        for k in sorted({"1", str(results[n]["num_samples"])}, key=int):
+        for k in sorted({"1", max(success, key=int)}, key=int):  # first and largest sample count recorded
             ax.plot(x, [success[k][b] for b in keep], marker="o", label=f"{n} @{k}")
     ax.set_xlabel("f: share of shortest paths through the required cell")
     ax.set_ylabel("success")
