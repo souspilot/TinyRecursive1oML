@@ -100,6 +100,25 @@ tasks=(
   "depth_trm|trm_seed42|sample trm_seed42 trm_seed42_depth32 1 --halt_steps 32"
   "depth_gram|gram_kl0.015_seed42|sample gram_kl0.015_seed42 gram_kl0.015_seed42_depth32 100 --halt_steps 32"
   "sample_gram_100k|gram_kl0.015_steps100000_seed42|sample gram_kl0.015_steps100000_seed42 gram_kl0.015_steps100000_seed42 100"
+
+  # Round 2: equal training (TRM baselines at 100k steps, as GRAM), GRAM on to 200k steps and its seed 1 to 100k.
+  # All continue a finished run (CONTINUE), so they cost only the extra steps.
+  "cont_gram_200k|gram_kl0.015_steps100000_seed42|train gram_kl0.015_steps200000_seed42 CONTINUE=gram_kl0.015_steps100000_seed42 KL_COEF=0.015 STEPS=200000 -- gram"
+  "cont_minloss_100k|trm_minloss_seed42|train trm_minloss_steps100000_seed42 CONTINUE=trm_minloss_seed42 STEPS=100000 -- trm_minloss"
+  "cont_iexplr_100k|trm_iexplr_seed42|train trm_iexplr_steps100000_seed42 CONTINUE=trm_iexplr_seed42 STEPS=100000 -- trm_iexplr"
+  "cont_trm_100k|trm_seed42|train trm_steps100000_seed42 CONTINUE=trm_seed42 STEPS=100000 -- trm"
+  "cont_gram_seed1_100k|gram_kl0.015_seed1|train gram_kl0.015_steps100000_seed1 CONTINUE=gram_kl0.015_seed1 KL_COEF=0.015 SEED=1 STEPS=100000 -- gram"
+  "walk_iexplr_greedy|trm_iexplr_seed42|walk trm_iexplr_seed42 trm_iexplr_seed42_walkgreedy 1 start greedy"
+  "sample_minloss_100k|trm_minloss_steps100000_seed42|sample trm_minloss_steps100000_seed42 trm_minloss_steps100000_seed42 1"
+  "sample_iexplr_100k|trm_iexplr_steps100000_seed42|sample trm_iexplr_steps100000_seed42 trm_iexplr_steps100000_seed42 1"
+  "sample_trm_100k|trm_steps100000_seed42|sample trm_steps100000_seed42 trm_steps100000_seed42 1"
+  "walk_trm_100k|trm_steps100000_seed42|walk trm_steps100000_seed42 trm_steps100000_seed42_walk 100 start sample"
+  "walk_trm_100k_greedy|trm_steps100000_seed42|walk trm_steps100000_seed42 trm_steps100000_seed42_walkgreedy 1 start greedy"
+  "walk_minloss_100k_greedy|trm_minloss_steps100000_seed42|walk trm_minloss_steps100000_seed42 trm_minloss_steps100000_seed42_walkgreedy 1 start greedy"
+  "walk_iexplr_100k_greedy|trm_iexplr_steps100000_seed42|walk trm_iexplr_steps100000_seed42 trm_iexplr_steps100000_seed42_walkgreedy 1 start greedy"
+  "walk_gram_100k|gram_kl0.015_steps100000_seed42|walk gram_kl0.015_steps100000_seed42 gram_kl0.015_steps100000_seed42_walk 20 start sample"
+  "sample_gram_200k|gram_kl0.015_steps200000_seed42|sample gram_kl0.015_steps200000_seed42 gram_kl0.015_steps200000_seed42 100"
+  "sample_gram_seed1_100k|gram_kl0.015_steps100000_seed1|sample gram_kl0.015_steps100000_seed1 gram_kl0.015_steps100000_seed1 100"
 )
 
 current=""
@@ -136,11 +155,15 @@ while true; do
     if [ ! -f "${claims}/${name}/finished" ] && [ ! -f "${claims}/${name}/failed" ]; then unfinished=1; fi
   done
   if [ ${unfinished} -eq 0 ]; then
-    if mkdir "${claims}/analysis" 2>/dev/null; then
+    # One analysis per version of the task list, so adding tasks later analyzes again
+    analysis=analysis_${#tasks[@]}
+    if mkdir "${claims}/${analysis}" 2>/dev/null; then
       echo "== $(date '+%F %T') All tasks done; analyzing"
       python scripts/analyze_maze_samples.py --data ${data} --samples ${samples} --out results/maze_15 \
         2>&1 | tee -a logs/maze_h2_analysis.log
-      touch "${claims}/analysis/finished"
+      python scripts/analyze_walk_failures.py --data ${data} --samples ${samples} --out results/maze_15 \
+        2>&1 | tee -a logs/maze_h2_analysis.log
+      touch "${claims}/${analysis}/finished"
     fi
     echo "== $(date '+%F %T') Nothing left to do"
     exit 0

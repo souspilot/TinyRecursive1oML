@@ -22,6 +22,9 @@
 #   When ROLLOUTS or NOISE_DIM is set, run names include it (e.g. trm_setmatch_k8_nd64_seed42).
 #
 # RESUME=1 continues an interrupted run from its latest checkpoint. SEED sets the seed (default 42).
+# CONTINUE=<finished run> trains that run on to STEPS steps under a new name (e.g. CONTINUE=trm_minloss_seed42
+# STEPS=100000 -> trm_minloss_steps100000_seed42), restoring its weights, optimizer, step and data order and keeping
+# its evaluation interval (the learning rate is constant after warm-up, so this equals one longer run).
 # KL_COEF sets GRAM's KL weight (default 0.07, untuned for mazes); when set, GRAM run names include it
 # (e.g. gram_kl0.01_seed42), so a KL sweep doesn't collide with the default runs. Likewise KL_BUDGET
 # (e.g. gram_budget_b0.5_seed42). STEPS sets the training length (default ~50000); when set, run names include it
@@ -94,6 +97,21 @@ fi
 runs_dir=checkpoints/Maze-15-compare
 
 [ -n "${WANDB_OFFLINE}" ] && arch_args="${arch_args} wandb_offline=True"
+
+if [ -n "${CONTINUE}" ]; then
+  # Keep the evaluation interval of the run being continued (also when resuming the continuation itself)
+  eval_interval=$(python -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['eval_interval'])" "${runs_dir}/${CONTINUE}/all_config.yaml")
+  epochs=$(( (steps * mazes_per_step / groups + eval_interval / 2) / eval_interval * eval_interval ))
+  if [ -z "${RESUME}" ]; then
+    source_ckpt=${runs_dir}/${CONTINUE}/final/checkpoint.pt
+    if [ ! -f "${source_ckpt}" ]; then
+      echo "${CONTINUE} has not finished (no ${source_ckpt}), so it can't be continued"
+      exit 1
+    fi
+    echo "Continuing ${CONTINUE} from ${source_ckpt}"
+    arch_args="${arch_args} +load_checkpoint=${source_ckpt} +resume=True"
+  fi
+fi
 
 if [ -n "${RESUME}" ]; then
   if [ -f "${runs_dir}/${run}/final/checkpoint.pt" ]; then
