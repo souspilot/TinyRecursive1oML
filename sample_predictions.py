@@ -9,12 +9,18 @@ Usage:
     torchrun --nproc-per-node 2 sample_predictions.py --checkpoint checkpoints/<project>/<run>/final/checkpoint.pt \\
         --data data/nqueens-10-1oml --num_samples 100 --out samples/nqueens_10/<run>
 
-Output: <out>/meta.json and <out>/shard_<i>.npz with `query_start` and `preds` (queries x samples x seq_len, uint8).
+Output: <out>/meta.json and <out>/shard_<i>.npz with `query_start`, `preds` (queries x samples x seq_len, uint8)
+and `q` (the halting head's final logit per sample, the model's own estimate that its answer is correct).
+
+Test-time options: --halt_steps runs more (or fewer) recursion steps than in training (depth scaling), and
+--latent_noise adds Gaussian noise of that scale to the latent state z_L before each recursion step after the
+first (as in the Probabilistic Tiny Recursive Model, which then picks the sample with the highest halting logit).
 """
 import argparse
 import json
 import math
 import os
+import sys
 
 import numpy as np
 import torch
@@ -60,6 +66,12 @@ def make_batch(data, metadata: PuzzleDatasetMetadata, start: int, end: int):
 
 def load_model(checkpoint_path: str, metadata: PuzzleDatasetMetadata, temperature: float, device: str):
     """Build the model with its loss head and load its EMA weights, as eval_pass_at_k.py does."""
+    # Checkpoints pickle these classes as defined in __main__ (pretrain.py); make them findable there whichever
+    # script is running
+    main_module = sys.modules["__main__"]
+    for cls in (PretrainConfig, ArchConfig, LossConfig, EvaluatorConfig):
+        if not hasattr(main_module, cls.__name__):
+            setattr(main_module, cls.__name__, cls)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
     model_cfg = dict(
@@ -89,16 +101,24 @@ def load_model(checkpoint_path: str, metadata: PuzzleDatasetMetadata, temperatur
 
 
 @torch.inference_mode()
-def sample(model, batch, num_samples: int, device: str) -> torch.Tensor:
-    """Run the model to completion on num_samples copies of each query. Returns (queries, samples, seq_len)."""
+def sample(model, batch, num_samples: int, device: str, latent_noise: float = 0.0):
+    """Run the model to completion on num_samples copies of each query.
+
+    Returns preds (queries, samples, seq_len) and the final halting logits (queries, samples)."""
     expanded = {k: v.to(device).repeat_interleave(num_samples, dim=0) for k, v in batch.items()}
     with torch.device(device):
         carry = model.initial_carry(expanded)
+    first = True
     while True:
-        carry, _, _, outputs, all_finish = model(carry=carry, batch=expanded, return_keys={"preds"})
+        if latent_noise > 0 and not first:
+            z_l = carry.inner_carry.z_L
+            carry.inner_carry.z_L = z_l + latent_noise * torch.randn_like(z_l)
+        carry, _, _, outputs, all_finish = model(carry=carry, batch=expanded, return_keys={"preds", "q_halt_logits"})
+        first = False
         if all_finish:
             break
-    return outputs["preds"].view(batch["inputs"].shape[0], num_samples, -1)
+    queries = batch["inputs"].shape[0]
+    return outputs["preds"].view(queries, num_samples, -1), outputs["q_halt_logits"].float().view(queries, num_samples)
 
 
 def main():
@@ -111,6 +131,9 @@ def main():
     parser.add_argument("--shard_size", type=int, default=512, help="Test queries per shard")
     parser.add_argument("--effective_batch_size", type=int, default=15360, help="Queries x samples per forward pass")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--halt_steps", type=int, default=None, help="Recursion steps per sample (default: as trained)")
+    parser.add_argument("--latent_noise", type=float, default=0.0, help="Scale of Gaussian noise added to z_L per step")
+    parser.add_argument("--max_queries", type=int, default=None, help="Sample only the first queries (for quick checks)")
     args = parser.parse_args()
 
     rank = int(os.environ.get("RANK", 0))
@@ -123,12 +146,14 @@ def main():
         device = "cpu"
 
     data, metadata = load_split(args.data)
-    num_queries = len(data["inputs"])
+    num_queries = len(data["inputs"]) if args.max_queries is None else min(args.max_queries, len(data["inputs"]))
     num_shards = math.ceil(num_queries / args.shard_size)
 
     # The settings that determine the samples; a rerun with different ones must not mix with existing shards
     meta = dict(checkpoint=args.checkpoint, data=args.data, num_samples=args.num_samples, temperature=args.temperature,
                 shard_size=args.shard_size, seed=args.seed, num_queries=num_queries, num_shards=num_shards)
+    # Recorded only when set, so directories sampled before these options existed still resume
+    meta.update({k: v for k, v in (("halt_steps", args.halt_steps), ("latent_noise", args.latent_noise)) if v})
     os.makedirs(args.out, exist_ok=True)
     meta_path = os.path.join(args.out, "meta.json")
     if os.path.exists(meta_path):
@@ -150,21 +175,26 @@ def main():
         return
 
     model, step = load_model(args.checkpoint, metadata, args.temperature, device)
+    if args.halt_steps is not None:
+        model.model.config.halt_max_steps = args.halt_steps
     print(f"[rank {rank}] Loaded {args.checkpoint} (step {step}) on {device}")
     queries_per_pass = max(1, args.effective_batch_size // args.num_samples)
 
     for done, shard in enumerate(todo, 1):
         start, end = shard * args.shard_size, min((shard + 1) * args.shard_size, num_queries)
         preds = np.empty((end - start, args.num_samples, metadata.seq_len), dtype=np.uint8)
+        q = np.empty((end - start, args.num_samples), dtype=np.float32)
         for batch_start in range(start, end, queries_per_pass):
             batch_end = min(batch_start + queries_per_pass, end)
             torch.manual_seed(args.seed * 1_000_003 + batch_start)
             batch = make_batch(data, metadata, batch_start, batch_end)
-            preds[batch_start - start:batch_end - start] = sample(model, batch, args.num_samples, device).cpu().numpy()
+            batch_preds, batch_q = sample(model, batch, args.num_samples, device, args.latent_noise)
+            preds[batch_start - start:batch_end - start] = batch_preds.cpu().numpy()
+            q[batch_start - start:batch_end - start] = batch_q.cpu().numpy()
 
         tmp_path = f"{shard_path(shard)}.tmp{rank}"
         with open(tmp_path, "wb") as f:
-            np.savez(f, query_start=start, preds=preds)
+            np.savez(f, query_start=start, preds=preds, q=q)
         os.replace(tmp_path, shard_path(shard))
         print(f"[rank {rank}] shard {shard} (queries {start}-{end - 1}) saved, {done}/{len(todo)}", flush=True)
 
