@@ -34,8 +34,8 @@ from sample_predictions import load_split, load_model
 MOVES = torch.tensor([(-1, 0), (1, 0), (0, -1), (0, 1)])
 
 
-def model_predictor(model, model_batch: int, device: str):
-    """Returns predict(inputs (N, seq_len)) -> (N, seq_len) probability of PATH, running the model to completion."""
+def model_predictor(model, model_batch: int, device: str, token: int = PATH):
+    """Returns predict(inputs (N, seq_len)) -> (N, seq_len) probability of `token`, running the model to completion."""
     one_of_many = getattr(model, "one_of_many", "naive") != "naive"
 
     @torch.inference_mode()
@@ -52,7 +52,7 @@ def model_predictor(model, model_batch: int, device: str):
                 carry, _, _, outputs, all_finish = model(carry=carry, batch=batch, return_keys={"logits"})
                 if all_finish:
                     break
-            out.append(torch.softmax(outputs["logits"].float(), dim=-1)[..., PATH])
+            out.append(torch.softmax(outputs["logits"].float(), dim=-1)[..., token])
         return torch.cat(out)
     return predict
 
