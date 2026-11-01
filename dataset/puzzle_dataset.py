@@ -49,6 +49,7 @@ class PuzzleDatasetConfig(pydantic.BaseModel):
     rank: int
     num_replicas: int
     rollouts: int = 1  # Training only: each sampled example appears this many times in a row (global_batch_size counts them)
+    path_hints: float = 0.0  # Training only, mazes: share of examples whose input reveals part of the target path
 
 class PuzzleDataset(IterableDataset):
     def __init__(self, config: PuzzleDatasetConfig, split: str = "train"):
@@ -229,6 +230,8 @@ class PuzzleDataset(IterableDataset):
             start_index = 0
             
             rollouts = self.config.rollouts
+            # Separate stream for path hints, so the data order matches runs without them
+            hint_rng = np.random.Generator(np.random.Philox(seed=self.config.seed + self._iters + 1_000_003))
             while start_index < group_order.size:
                 start_index, batch_indices, batch_puzzle_indices = _sample_batch(
                     rng,
@@ -252,9 +255,13 @@ class PuzzleDataset(IterableDataset):
 
                 batch_indices        = batch_indices       [self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]
                 batch_puzzle_indices = batch_puzzle_indices[self.config.rank * self.local_batch_size: (self.config.rank + 1) * self.local_batch_size]
+                inputs, labels = dataset["inputs"][batch_indices], dataset["labels"][batch_indices]
+                if self.config.path_hints > 0:
+                    from evaluators.maze_utils import add_path_hints
+                    inputs = add_path_hints(inputs, labels, hint_rng, self.config.path_hints)
                 batch = self._collate_batch({
-                    "inputs": dataset["inputs"][batch_indices],
-                    "labels": dataset["labels"][batch_indices],
+                    "inputs": inputs,
+                    "labels": labels,
                     "puzzle_identifiers": dataset["puzzle_identifiers"][batch_puzzle_indices],
                     **self._optional_fields(dataset, batch_indices),
                 })
