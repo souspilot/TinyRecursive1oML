@@ -148,7 +148,9 @@ echo "$(hostname) job=${PBS_JOBID:-none} started $(date '+%F %T')" > "${claim}/o
 trap 'rm -rf "${claim}"; exit 130' INT TERM
 
 echo "${run}: ${data}, ${epochs} epochs (evaluation every ${eval_interval}) for ~${steps} steps"
-nproc=${NPROC:-$(nvidia-smi -L | wc -l)}
+# One process per visible GPU (nvidia-smi lists every GPU of the job, ignoring CUDA_VISIBLE_DEVICES)
+if [ -n "${CUDA_VISIBLE_DEVICES}" ]; then visible=$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | grep -c .); else visible=$(nvidia-smi -L | wc -l); fi
+nproc=${NPROC:-${visible}}
 if ! torchrun --nproc-per-node ${nproc} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 --nnodes=1 pretrain.py \
 ${arch_args} \
 seed=${SEED:-42} \
