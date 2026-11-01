@@ -30,6 +30,8 @@
 # (e.g. gram_budget_b0.5_seed42). STEPS sets the training length (default ~50000); when set, run names include it
 # (e.g. gram_kl0.015_steps100000_seed42).
 # WANDB_OFFLINE=1 logs to W&B offline (for nodes without internet); upload later with `wandb sync`.
+# ROOT, PROJECT and EXTRA_ARGS reuse this script for other datasets built the same way (default data/maze-15,
+# Maze-15-compare, none); EXTRA_ARGS are appended to the pretrain.py arguments. See scripts/sat_compare.sh.
 #
 # Datasets (build once):
 #   python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-15
@@ -37,7 +39,8 @@ set -e
 
 method=$1
 steps=${STEPS:-50000}
-root=data/maze-15
+root=${ROOT:-data/maze-15}
+project=${PROJECT:-Maze-15-compare}
 gram_args="arch=gram arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=4 arch.kl_balance_alpha=0.8 arch.kl_coef=${KL_COEF:-0.07}"
 trm_args="arch=trm arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=4"
 case $method in
@@ -94,9 +97,10 @@ fi
 if [ -n "${STEPS}" ]; then
   run=${run%_seed*}_steps${STEPS}_seed${SEED:-42}
 fi
-runs_dir=checkpoints/Maze-15-compare
+runs_dir=checkpoints/${project}
 
 [ -n "${WANDB_OFFLINE}" ] && arch_args="${arch_args} wandb_offline=True"
+[ -n "${EXTRA_ARGS}" ] && arch_args="${arch_args} ${EXTRA_ARGS}"
 
 if [ -n "${CONTINUE}" ]; then
   # Keep the evaluation interval of the run being continued (also when resuming the continuation itself)
@@ -154,7 +158,7 @@ data_paths_test="[${root}-1oml]" \
 evaluators="[]" \
 epochs=${epochs} eval_interval=${eval_interval} \
 lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
-+project_name=Maze-15-compare \
++project_name=${project} \
 +run_name=${run} ema=True \
 checkpoint_every_eval=True; then
   rm -rf "${claim}"
