@@ -43,7 +43,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evaluators.maze_utils import ShortestPaths, batch_verify_maze, PAD, WALL, OPEN, START, GOAL, PATH  # noqa: E402
 from evaluators.nqueens_utils import verify_nqueens  # noqa: E402
-from sample_predictions import load_split, load_model  # noqa: E402
+from sample_predictions import load_split, load_model, noisy_init  # noqa: E402
 
 QUEEN = 2
 REPORT_STEPS = (1, 2, 3, 4, 6, 8, 12, 16)
@@ -170,42 +170,25 @@ SYMMETRIES = [(k, flip) for flip in (False, True) for k in range(4)]
 
 
 def step_probs(model, inputs, token, model_batch, device, init_noise=0.0, seed=0):
-    """Probability of `token` per cell after each supervision step: (steps, N, seq_len), float16."""
+    """Probability of `token` per cell after each supervision step: (steps, N, seq_len)."""
     one_of_many = getattr(model, "one_of_many", "naive") != "naive"
-    inner = model.model.inner
-    original_reset = inner.reset_carry
     generator = torch.Generator(device=device).manual_seed(seed)
-
-    def noisy_reset(flag, carry):
-        carry = original_reset(flag, carry)
-        m = flag.view(-1, 1, 1)
-        for field in ("z_H", "z_L"):
-            z = getattr(carry, field)
-            noise = torch.randn(z.shape, generator=generator, device=z.device, dtype=torch.float32).to(z.dtype)
-            setattr(carry, field, torch.where(m, z + init_noise * noise, z))
-        return carry
-
-    if init_noise > 0:
-        inner.reset_carry = noisy_reset
     out = []
-    try:
-        with torch.inference_mode():
-            for i in range(0, len(inputs), model_batch):
-                x = torch.as_tensor(inputs[i:i + model_batch], device=device, dtype=torch.int32)
-                batch = {"inputs": x, "labels": x.clone(), "puzzle_identifiers": torch.zeros(len(x), dtype=torch.int32, device=device)}
-                if one_of_many:
-                    batch["label_set"] = x.clone().unsqueeze(1)
-                with torch.device(device):
-                    carry = model.initial_carry(batch)
-                steps = []
-                while True:
-                    carry, _, _, outputs, all_finish = model(carry=carry, batch=batch, return_keys={"logits"})
-                    steps.append(torch.softmax(outputs["logits"].float(), -1)[..., token].half().cpu())
-                    if all_finish:
-                        break
-                out.append(torch.stack(steps))
-    finally:
-        inner.reset_carry = original_reset
+    with torch.inference_mode(), noisy_init(model, init_noise, generator):
+        for i in range(0, len(inputs), model_batch):
+            x = torch.as_tensor(inputs[i:i + model_batch], device=device, dtype=torch.int32)
+            batch = {"inputs": x, "labels": x.clone(), "puzzle_identifiers": torch.zeros(len(x), dtype=torch.int32, device=device)}
+            if one_of_many:
+                batch["label_set"] = x.clone().unsqueeze(1)
+            with torch.device(device):
+                carry = model.initial_carry(batch)
+            steps = []
+            while True:
+                carry, _, _, outputs, all_finish = model(carry=carry, batch=batch, return_keys={"logits"})
+                steps.append(torch.softmax(outputs["logits"].float(), -1)[..., token].cpu())
+                if all_finish:
+                    break
+            out.append(torch.stack(steps))
     return torch.cat(out, 1).numpy()
 
 

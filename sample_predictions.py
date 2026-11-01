@@ -15,8 +15,13 @@ and `q` (the halting head's final logit per sample, the model's own estimate tha
 Test-time options: --halt_steps runs more (or fewer) recursion steps than in training (depth scaling), and
 --latent_noise adds Gaussian noise of that scale to the latent state z_L before each recursion step after the
 first (as in the Probabilistic Tiny Recursive Model, which then picks the sample with the highest halting logit).
+--init_noise adds the noise to the initial latent state (z_H and z_L) instead: the recursion commits to one of
+several solutions within its first supervision step (scripts/tie_breaking.py), so later noise comes too late.
+--symmetry decodes sample j on the board turned by the j-th of the square's 8 symmetries (rotations, reflections)
+and maps the answer back; it suits tasks whose rules are symmetric (N-Queens, mazes).
 """
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -100,25 +105,77 @@ def load_model(checkpoint_path: str, metadata: PuzzleDatasetMetadata, temperatur
     return model.to(device).eval(), checkpoint.get("step")
 
 
+SYMMETRIES = [(k, flip) for flip in (False, True) for k in range(4)]  # quarter turns, then a left-right flip
+
+
+def apply_views(x: torch.Tensor, views: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    """Transform each flattened square board in x (N, n*n) by its symmetry SYMMETRIES[views[i]] (or undo it)."""
+    n = int(round(x.shape[1] ** 0.5))
+    out = x.clone()
+    for v, (k, flip) in enumerate(SYMMETRIES):
+        rows = views == v
+        if not rows.any():
+            continue
+        g = x[rows].view(-1, n, n)
+        if not inverse:
+            g = torch.rot90(g, k, (1, 2))
+            g = g.flip(2) if flip else g
+        else:
+            g = g.flip(2) if flip else g
+            g = torch.rot90(g, -k, (1, 2))
+        out[rows] = g.reshape(len(g), -1)
+    return out
+
+
+@contextlib.contextmanager
+def noisy_init(model, scale: float, generator: torch.Generator = None):
+    """Add Gaussian noise of this scale to the initial latent state (z_H and z_L, per example and position)."""
+    if scale <= 0:
+        yield
+        return
+    inner = model.model.inner
+    original = inner.reset_carry
+
+    def reset(flag, carry):
+        carry = original(flag, carry)
+        for field in ("z_H", "z_L"):
+            z = getattr(carry, field)
+            noise = torch.randn(z.shape, generator=generator, device=z.device, dtype=torch.float32).to(z.dtype)
+            setattr(carry, field, torch.where(flag.view(-1, 1, 1), z + scale * noise, z))
+        return carry
+
+    inner.reset_carry = reset
+    try:
+        yield
+    finally:
+        inner.reset_carry = original
+
+
 @torch.inference_mode()
-def sample(model, batch, num_samples: int, device: str, latent_noise: float = 0.0):
+def sample(model, batch, num_samples: int, device: str, latent_noise: float = 0.0, init_noise: float = 0.0,
+           symmetry: bool = False):
     """Run the model to completion on num_samples copies of each query.
 
     Returns preds (queries, samples, seq_len) and the final halting logits (queries, samples)."""
     expanded = {k: v.to(device).repeat_interleave(num_samples, dim=0) for k, v in batch.items()}
+    views = torch.arange(len(expanded["inputs"]), device=device) % num_samples % len(SYMMETRIES) if symmetry else None
+    if symmetry:
+        expanded["inputs"] = apply_views(expanded["inputs"], views)
     with torch.device(device):
         carry = model.initial_carry(expanded)
     first = True
-    while True:
-        if latent_noise > 0 and not first:
-            z_l = carry.inner_carry.z_L
-            carry.inner_carry.z_L = z_l + latent_noise * torch.randn_like(z_l)
-        carry, _, _, outputs, all_finish = model(carry=carry, batch=expanded, return_keys={"preds", "q_halt_logits"})
-        first = False
-        if all_finish:
-            break
+    with noisy_init(model, init_noise):
+        while True:
+            if latent_noise > 0 and not first:
+                z_l = carry.inner_carry.z_L
+                carry.inner_carry.z_L = z_l + latent_noise * torch.randn_like(z_l)
+            carry, _, _, outputs, all_finish = model(carry=carry, batch=expanded, return_keys={"preds", "q_halt_logits"})
+            first = False
+            if all_finish:
+                break
+    preds = apply_views(outputs["preds"], views, inverse=True) if symmetry else outputs["preds"]
     queries = batch["inputs"].shape[0]
-    return outputs["preds"].view(queries, num_samples, -1), outputs["q_halt_logits"].float().view(queries, num_samples)
+    return preds.view(queries, num_samples, -1), outputs["q_halt_logits"].float().view(queries, num_samples)
 
 
 def main():
@@ -133,6 +190,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--halt_steps", type=int, default=None, help="Recursion steps per sample (default: as trained)")
     parser.add_argument("--latent_noise", type=float, default=0.0, help="Scale of Gaussian noise added to z_L per step")
+    parser.add_argument("--init_noise", type=float, default=0.0, help="Scale of Gaussian noise added to the initial latent")
+    parser.add_argument("--symmetry", action="store_true", help="Sample j decodes the board under the j-th of 8 symmetries")
     parser.add_argument("--max_queries", type=int, default=None, help="Sample only the first queries (for quick checks)")
     args = parser.parse_args()
 
@@ -153,7 +212,8 @@ def main():
     meta = dict(checkpoint=args.checkpoint, data=args.data, num_samples=args.num_samples, temperature=args.temperature,
                 shard_size=args.shard_size, seed=args.seed, num_queries=num_queries, num_shards=num_shards)
     # Recorded only when set, so directories sampled before these options existed still resume
-    meta.update({k: v for k, v in (("halt_steps", args.halt_steps), ("latent_noise", args.latent_noise)) if v})
+    meta.update({k: v for k, v in (("halt_steps", args.halt_steps), ("latent_noise", args.latent_noise),
+                                   ("init_noise", args.init_noise), ("symmetry", args.symmetry)) if v})
     os.makedirs(args.out, exist_ok=True)
     meta_path = os.path.join(args.out, "meta.json")
     if os.path.exists(meta_path):
@@ -188,7 +248,8 @@ def main():
             batch_end = min(batch_start + queries_per_pass, end)
             torch.manual_seed(args.seed * 1_000_003 + batch_start)
             batch = make_batch(data, metadata, batch_start, batch_end)
-            batch_preds, batch_q = sample(model, batch, args.num_samples, device, args.latent_noise)
+            batch_preds, batch_q = sample(model, batch, args.num_samples, device, args.latent_noise, args.init_noise,
+                                          args.symmetry)
             preds[batch_start - start:batch_end - start] = batch_preds.cpu().numpy()
             q[batch_start - start:batch_end - start] = batch_q.cpu().numpy()
 
