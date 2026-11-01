@@ -84,6 +84,7 @@ def candidate(rng: np.random.Generator, assignments: sat_utils.Assignments, conf
 
 def generate_chunk(args):
     seed, config, num_candidates, needed = args
+    config = DataProcessConfig(**config)  # passed as a dict: argdantic's wrapped config class can't be pickled
     rng = np.random.default_rng(seed)
     assignments = sat_utils.Assignments(config.num_vars)
     n, max_clauses = config.num_vars, max_clauses_for(config)
@@ -123,7 +124,8 @@ def draw_formulas(config: DataProcessConfig, quotas, rng, seen_inputs):
         # Rounds of chunks with seeds drawn up front, so the result doesn't depend on the number of processes
         while not all(len(f) >= q for f, q in zip(filled, quotas)):
             needed = tuple(len(f) < q for f, q in zip(filled, quotas))
-            tasks = [(int(rng.integers(2**63)), config, 1000, needed) for _ in range(64)]
+            fields = {k: getattr(config, k) for k in DataProcessConfig.model_fields}
+            tasks = [(int(rng.integers(2**63)), fields, 1000, needed) for _ in range(64)]
             for results in pool.imap(generate_chunk, tasks):
                 for example in results:
                     g = count_group(example["num_solutions"])
