@@ -18,7 +18,9 @@ first (as in the Probabilistic Tiny Recursive Model, which then picks the sample
 --init_noise adds the noise to the initial latent state (z_H and z_L) instead: the recursion commits to one of
 several solutions within its first supervision step (scripts/tie_breaking.py), so later noise comes too late.
 --symmetry decodes sample j on the board turned by the j-th of the square's 8 symmetries (rotations, reflections)
-and maps the answer back; it suits tasks whose rules are symmetric (N-Queens, mazes).
+and maps the answer back; it suits tasks whose rules are symmetric (N-Queens, mazes). --sat_views is its analogue
+for 3-SAT (dataset/build_sat_dataset.py): every sample after the first decodes the formula with its variables
+renamed, their signs flipped, and its clauses and their literals reordered at random, and maps the assignment back.
 """
 import argparse
 import contextlib
@@ -127,6 +129,39 @@ def apply_views(x: torch.Tensor, views: torch.Tensor, inverse: bool = False) -> 
     return out
 
 
+def sat_views(x: torch.Tensor, n: int, identity: torch.Tensor):
+    """A random equivalent of each 3-SAT formula in x (N, n + 3 * max_clauses): variable i becomes perm[:, i],
+    negated where flip[:, i], with clauses (padding kept last) and the literals in each clause shuffled. Rows where
+    identity is set are left as they are. Returns the new inputs, perm and flip (for undo_sat_views)."""
+    num, device = len(x), x.device
+    perm = torch.where(identity[:, None], torch.arange(n, device=device), torch.rand(num, n, device=device).argsort(1))
+    flip = ~identity[:, None] & (torch.rand(num, n, device=device) < 0.5)
+    # Token map per row: POS(i) -> POS/NEG(perm[i]), NEG(i) -> NEG/POS(perm[i]), FREE(i) -> FREE(perm[i])
+    table = torch.arange(3 + 3 * n, device=device).repeat(num, 1)
+    table[:, 3:3 + n] = torch.where(flip, 3 + n + perm, 3 + perm)
+    table[:, 3 + n:3 + 2 * n] = torch.where(flip, 3 + perm, 3 + n + perm)
+    table[:, 3 + 2 * n:] = 3 + 2 * n + perm
+    mapped = table.gather(1, x.long())
+    slots = torch.empty_like(mapped[:, :n]).scatter_(1, perm, mapped[:, :n])
+    clauses = mapped[:, n:].view(num, -1, 3)
+    shuffle = lambda shape: torch.rand(shape, device=device)
+    literal_order = torch.where(identity[:, None, None], torch.arange(3, device=device), shuffle(clauses.shape).argsort(2))
+    clauses = clauses.gather(2, literal_order)
+    is_pad = clauses[:, :, 0] == 0
+    clause_order = torch.where(identity[:, None], torch.arange(clauses.shape[1], device=device),
+                               (shuffle(is_pad.shape) + 2 * is_pad).argsort(1))
+    clauses = clauses.gather(1, clause_order[:, :, None].expand_as(clauses))
+    return torch.cat([slots, clauses.flatten(1)], 1).to(x.dtype), perm, flip
+
+
+def undo_sat_views(preds: torch.Tensor, perm: torch.Tensor, flip: torch.Tensor) -> torch.Tensor:
+    """Map assignments decoded on sat_views formulas back to the original variables (FALSE = 1, TRUE = 2)."""
+    n = perm.shape[1]
+    values = preds[:, :n].gather(1, perm)
+    values = torch.where(flip & ((values == 1) | (values == 2)), 3 - values, values)
+    return torch.cat([values, preds[:, n:]], 1)
+
+
 @contextlib.contextmanager
 def noisy_init(model, scale: float, generator: torch.Generator = None):
     """Add Gaussian noise of this scale to the initial latent state (z_H and z_L, per example and position)."""
@@ -153,14 +188,18 @@ def noisy_init(model, scale: float, generator: torch.Generator = None):
 
 @torch.inference_mode()
 def sample(model, batch, num_samples: int, device: str, latent_noise: float = 0.0, init_noise: float = 0.0,
-           symmetry: bool = False):
+           symmetry: bool = False, sat_vars: int = 0):
     """Run the model to completion on num_samples copies of each query.
 
+    sat_vars: with n > 0, decode every sample after each query's first on a random sat_views equivalent (n variables).
     Returns preds (queries, samples, seq_len) and the final halting logits (queries, samples)."""
     expanded = {k: v.to(device).repeat_interleave(num_samples, dim=0) for k, v in batch.items()}
     views = torch.arange(len(expanded["inputs"]), device=device) % num_samples % len(SYMMETRIES) if symmetry else None
     if symmetry:
         expanded["inputs"] = apply_views(expanded["inputs"], views)
+    if sat_vars:
+        identity = torch.arange(len(expanded["inputs"]), device=device) % num_samples == 0
+        expanded["inputs"], perm, flip = sat_views(expanded["inputs"], sat_vars, identity)
     with torch.device(device):
         carry = model.initial_carry(expanded)
     first = True
@@ -174,6 +213,8 @@ def sample(model, batch, num_samples: int, device: str, latent_noise: float = 0.
             if all_finish:
                 break
     preds = apply_views(outputs["preds"], views, inverse=True) if symmetry else outputs["preds"]
+    if sat_vars:
+        preds = undo_sat_views(preds, perm, flip)
     queries = batch["inputs"].shape[0]
     return preds.view(queries, num_samples, -1), outputs["q_halt_logits"].float().view(queries, num_samples)
 
@@ -192,6 +233,8 @@ def main():
     parser.add_argument("--latent_noise", type=float, default=0.0, help="Scale of Gaussian noise added to z_L per step")
     parser.add_argument("--init_noise", type=float, default=0.0, help="Scale of Gaussian noise added to the initial latent")
     parser.add_argument("--symmetry", action="store_true", help="Sample j decodes the board under the j-th of 8 symmetries")
+    parser.add_argument("--sat_views", action="store_true",
+                        help="3-SAT: samples after the first decode the formula with variables renamed and negated, clauses reordered")
     parser.add_argument("--max_queries", type=int, default=None, help="Sample only the first queries (for quick checks)")
     args = parser.parse_args()
 
@@ -213,7 +256,8 @@ def main():
                 shard_size=args.shard_size, seed=args.seed, num_queries=num_queries, num_shards=num_shards)
     # Recorded only when set, so directories sampled before these options existed still resume
     meta.update({k: v for k, v in (("halt_steps", args.halt_steps), ("latent_noise", args.latent_noise),
-                                   ("init_noise", args.init_noise), ("symmetry", args.symmetry)) if v})
+                                   ("init_noise", args.init_noise), ("symmetry", args.symmetry),
+                                   ("sat_views", args.sat_views)) if v})
     os.makedirs(args.out, exist_ok=True)
     meta_path = os.path.join(args.out, "meta.json")
     if os.path.exists(meta_path):
@@ -239,6 +283,7 @@ def main():
         model.model.config.halt_max_steps = args.halt_steps
     print(f"[rank {rank}] Loaded {args.checkpoint} (step {step}) on {device}")
     queries_per_pass = max(1, args.effective_batch_size // args.num_samples)
+    sat_vars = (metadata.vocab_size - 3) // 3 if args.sat_views else 0
 
     for done, shard in enumerate(todo, 1):
         start, end = shard * args.shard_size, min((shard + 1) * args.shard_size, num_queries)
@@ -249,7 +294,7 @@ def main():
             torch.manual_seed(args.seed * 1_000_003 + batch_start)
             batch = make_batch(data, metadata, batch_start, batch_end)
             batch_preds, batch_q = sample(model, batch, args.num_samples, device, args.latent_noise, args.init_noise,
-                                          args.symmetry)
+                                          args.symmetry, sat_vars)
             preds[batch_start - start:batch_end - start] = batch_preds.cpu().numpy()
             q[batch_start - start:batch_end - start] = batch_q.cpu().numpy()
 
