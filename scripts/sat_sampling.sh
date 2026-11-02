@@ -15,6 +15,7 @@ project=${PROJECT:-Sat-16-compare}
 data=${DATA:-data/sat-16-1oml}
 samples=${SAMPLES:-samples/sat_16}
 gram=gram_kl${GRAM_KL:-0.015}_seed42  # GRAM_KL: the KL_COEF its run was trained with
+batch="--effective_batch_size ${EFFECTIVE_BATCH_SIZE:-7680}"  # As mazes, of similar length; twice this overflows 80 GB
 claims=${samples}/.claims
 mkdir -p logs ${claims}
 
@@ -33,11 +34,11 @@ tasks=(  # <script> <run> <out name> [options]
   "sample_predictions.py trm_seed42 trm_seed42 --num_samples 1"
   "sample_predictions.py trm_minloss_seed42 trm_minloss_seed42 --num_samples 1"
   "sample_predictions.py trm_iexplr_seed42 trm_iexplr_seed42 --num_samples 1"
-  "sample_predictions.py ${gram} ${gram} --num_samples 100"
-  "sample_predictions.py trm_seed42 trm_seed42_views_init1 --num_samples 100 --sat_views --init_noise 1"
-  "sample_predictions.py trm_minloss_seed42 trm_minloss_seed42_views_init1 --num_samples 100 --sat_views --init_noise 1"
-  "sample_predictions.py trm_iexplr_seed42 trm_iexplr_seed42_views_init1 --num_samples 100 --sat_views --init_noise 1"
-  "sample_predictions.py ${gram} ${gram}_views --num_samples 100 --sat_views"
+  "sample_predictions.py ${gram} ${gram} --num_samples 100 ${batch}"
+  "sample_predictions.py trm_seed42 trm_seed42_views_init1 --num_samples 100 --sat_views --init_noise 1 ${batch}"
+  "sample_predictions.py trm_minloss_seed42 trm_minloss_seed42_views_init1 --num_samples 100 --sat_views --init_noise 1 ${batch}"
+  "sample_predictions.py trm_iexplr_seed42 trm_iexplr_seed42_views_init1 --num_samples 100 --sat_views --init_noise 1 ${batch}"
+  "sample_predictions.py ${gram} ${gram}_views --num_samples 100 --sat_views ${batch}"
   "sat_commit_decode.py trm_seed42 trm_seed42_commitgreedy --num_samples 1 --choice greedy"
   "sat_commit_decode.py trm_minloss_seed42 trm_minloss_seed42_commitgreedy --num_samples 1 --choice greedy"
   "sat_commit_decode.py trm_iexplr_seed42 trm_iexplr_seed42_commitgreedy --num_samples 1 --choice greedy"
