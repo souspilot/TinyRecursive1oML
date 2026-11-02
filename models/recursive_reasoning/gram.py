@@ -432,7 +432,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                     if self.config.use_patchify:
                         y_tar = self._get_label_embedding(batch["labels"])
                     else:
-                        y_tar = F.one_hot(batch["labels"].long(), num_classes=self.config.vocab_size).to(torch.float32)
+                        y_tar = F.one_hot(batch["labels"].long().clamp_min(0), num_classes=self.config.vocab_size).to(torch.float32)  # Ignored labels (-100) read as token 0
                     z, _, _ = self.variational.sample_posterior(h_t, y_tar)
                 else:
                     z, _, _ = self.variational.sample_prior(h_t)
@@ -464,7 +464,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
             if self.config.use_patchify:
                 y_tar = self._get_label_embedding(batch["labels"])
             else:
-                y_tar = F.one_hot(batch["labels"].long(), num_classes=self.config.vocab_size).to(torch.float32)
+                y_tar = F.one_hot(batch["labels"].long().clamp_min(0), num_classes=self.config.vocab_size).to(torch.float32)  # Ignored labels (-100) read as token 0
             z_post, post_mu, post_logvar = self.variational.sample_posterior(sample_in, y_tar)
             vae_outputs['post_mu'] = post_mu
             vae_outputs['post_logvar'] = post_logvar
