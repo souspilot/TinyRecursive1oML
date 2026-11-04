@@ -13,9 +13,11 @@ assignments). Reports, per run (a directory in --samples holding meta.json and s
    values against its exact share (var_shares), and the total-variation distance of the sampled solutions from
    uniform, each next to what an exact uniform sampler with the same number of valid samples gets (sampling noise).
 4. Hidden constraints: an unseen requirement "variable i = v", met by a share f of the solutions, binned by f.
-5. If the shards have them: halting-head selection (`q`: the sample with the highest final halting logit), Knuth's
-   solution-count estimate (`log_q` from sat_commit_decode.py: mean of valid / q over samples, against the exact
-   count), and model passes (`passes`).
+5. If the shards have them: halting-head selection (`q`: the sample with the highest final halting logit), model
+   passes (`passes`), and for sat_commit_decode.py runs that sample without forcing values, Knuth's solution-count
+   estimate (`log_q`: mean of valid / q over samples, against the exact count).
+
+Accuracy tables also hold a `random guess` row, computed exactly: uniform values on the free variables, givens copied.
 
 Writes <out>/<run>.json and <out>/summary.md.
 """
@@ -159,7 +161,31 @@ def hidden_constraints(solution, test, solutions, assignments, sample_counts):
     }
 
 
-def analyze_run(fields, n, test, solutions, assignments, rng):
+def formula_groups(test, n):
+    num_solutions = test["num_solutions"]
+    alpha = test["num_clauses"] / n
+    return {
+        "by_solutions": [(bucket_name(lo, hi), (num_solutions >= lo) & (num_solutions <= hi)) for lo, hi in COUNT_BUCKETS],
+        "by_alpha": [(f"{lo:.1f}-{hi:.1f}", (alpha >= lo) & (alpha < hi)) for lo, hi in zip(ALPHA_EDGES[:-1], ALPHA_EDGES[1:])],
+        "by_backbone": [(bucket_name(lo, hi), (test["backbone"] >= lo) & (test["backbone"] <= hi)) for lo, hi in BACKBONE_BUCKETS],
+    }
+
+
+def random_guess(n, test):
+    """Exact results of guessing the free variables uniformly and copying the givens."""
+    num_solutions = test["num_solutions"]
+    assignments_left = 2.0 ** (n - test["num_givens"])
+    hit = num_solutions / assignments_left
+    multi = num_solutions > 1
+    by_samples = {str(k): {"any_valid": float((1 - (1 - hit) ** k).mean()),
+                           "coverage_multi_solution": float((1 - (1 - 1 / assignments_left[multi]) ** k).mean())}
+                  for k in SAMPLE_COUNTS}
+    first_sample = {g: {name: float(hit[mask].mean()) if mask.any() else None for name, mask in buckets}
+                    for g, buckets in formula_groups(test, n).items()}
+    return {"by_samples": by_samples, "first_sample": first_sample}
+
+
+def analyze_run(fields, meta, n, test, solutions, assignments, rng):
     preds = fields["preds"]
     num_queries, num_samples = preds.shape[:2]
     sample_counts = [k for k in SAMPLE_COUNTS if k <= num_samples]
@@ -190,12 +216,7 @@ def analyze_run(fields, n, test, solutions, assignments, rng):
         }
 
     first = valid[:, 0]
-    alpha = test["num_clauses"] / n
-    groups = {
-        "by_solutions": [(bucket_name(lo, hi), (num_solutions >= lo) & (num_solutions <= hi)) for lo, hi in COUNT_BUCKETS],
-        "by_alpha": [(f"{lo:.1f}-{hi:.1f}", (alpha >= lo) & (alpha < hi)) for lo, hi in zip(ALPHA_EDGES[:-1], ALPHA_EDGES[1:])],
-        "by_backbone": [(bucket_name(lo, hi), (test["backbone"] >= lo) & (test["backbone"] <= hi)) for lo, hi in BACKBONE_BUCKETS],
-    }
+    groups = formula_groups(test, n)
     first_sample = {g: {name: {"queries": int(mask.sum()), "accuracy": float(first[mask].mean()) if mask.any() else None,
                                "valid_samples": float(valid[mask].mean()) if mask.any() else None}
                         for name, mask in buckets}
@@ -216,14 +237,16 @@ def analyze_run(fields, n, test, solutions, assignments, rng):
                                             for name, mask in subsets.items()}
     if "passes" in fields:
         result["model_passes"] = float(fields["passes"].mean())
-    if "log_q" in fields:
+    # Greedy or forced commits don't record the probability of the sample, so only sampled commits estimate counts
+    if "log_q" in fields and meta.get("choice") == "sample" and meta.get("certain", 0) > 1:
         estimate = (valid * np.exp(-fields["log_q"])).mean(1)
-        log2_ratio = np.log2(np.maximum(estimate, 1e-12) / num_solutions)
+        found = estimate > 0  # With no valid sample the estimate is 0, which says nothing about its accuracy
+        log2_ratio = np.log2(np.where(found, estimate, 1.0) / num_solutions)
         result["count_estimate"] = {
             name: {"queries": int(mask.sum()),
-                   "median_abs_log2_error": float(np.median(np.abs(log2_ratio[mask]))),
-                   "within_2x": float((np.abs(log2_ratio[mask]) <= 1).mean()),
-                   "median_log2_ratio": float(np.median(log2_ratio[mask]))}
+                   "no_valid_sample": float((~found[mask]).mean()),
+                   "within_2x": float((found[mask] & (np.abs(log2_ratio[mask]) <= 1)).mean()),
+                   "median_log2_ratio": float(np.median(log2_ratio[mask & found])) if (mask & found).any() else None}
             for name, mask in groups["by_solutions"] if mask.any()
         }
     return result
@@ -233,7 +256,7 @@ def pct(x):
     return "n/a" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{100 * x:.1f}"
 
 
-def write_summary(results, out_dir):
+def write_summary(results, guess, out_dir):
     names = sorted(results)
     lines = ["# 3-SAT samples", ""]
 
@@ -243,6 +266,10 @@ def write_summary(results, out_dir):
     lines.append("| run | samples | majority (all) | majority (one-sol) | majority (multi-sol) | any-valid (all) | "
                  "coverage (multi-sol) | uniform |")
     lines.append("|---|---|---|---|---|---|---|---|")
+    max_samples = max(results[n]["num_samples"] for n in names)
+    for k, m in guess["by_samples"].items():
+        if int(k) <= max_samples:
+            lines.append(f"| random guess | {k} | n/a | n/a | n/a | {pct(m['any_valid'])} | {pct(m['coverage_multi_solution'])} | n/a |")
     for n in names:
         for k, m in results[n]["by_samples"].items():
             lines.append(f"| {n} | {k} | {pct(m['all']['majority_vote'])} | {pct(m['one_solution']['majority_vote'])} | "
@@ -257,6 +284,7 @@ def write_summary(results, out_dir):
         lines += ["", f"## First-sample accuracy by {title}", ""]
         lines.append("| run | " + " | ".join(f"{b} (n={buckets[b]['queries']})" for b in keep) + " |")
         lines.append("|" + "---|" * (1 + len(keep)))
+        lines.append("| random guess | " + " | ".join(f"{100 * guess['first_sample'][g][b]:.2f}" for b in keep) + " |")
         for n in names:
             lines.append(f"| {n} | " + " | ".join(pct(results[n]["first_sample"][g][b]["accuracy"]) for b in keep) + " |")
 
@@ -291,17 +319,24 @@ def write_summary(results, out_dir):
             s = results[n]["halting_head_selection"]
             lines.append(f"| {n} | {results[n]['num_samples']} | {pct(s['all'])} | {pct(s['one_solution'])} | {pct(s['multi_solution'])} |")
 
+    decoded = [n for n in names if "model_passes" in results[n]]
+    if decoded:
+        lines += ["", "## Model passes per sample", "", "| run | passes |", "|---|---|"]
+        lines += [f"| {n} | {results[n]['model_passes']:.1f} |" for n in decoded]
+
     counting = [n for n in names if "count_estimate" in results[n]]
     if counting:
         lines += ["", "## Solution counts from commit sampling (Knuth's estimator)", "",
-                  "Median |log2(estimate / exact count)| and share within a factor of 2, by exact count.", ""]
+                  "By exact count: % of formulas with no valid sample (estimate 0), % estimated within a factor of 2, and the "
+                  "median log2(estimate / exact count) among formulas with a valid sample.", ""]
         buckets = list(results[counting[0]]["count_estimate"])
-        lines.append("| run | passes | " + " | ".join(f"{b}: median / within 2x / median log2 ratio" for b in buckets) + " |")
-        lines.append("|" + "---|" * (2 + len(buckets)))
+        lines.append("| run | " + " | ".join(f"{b}: none / within 2x / log2 ratio" for b in buckets) + " |")
+        lines.append("|" + "---|" * (1 + len(buckets)))
+        ratio = lambda x: "n/a" if x is None else f"{x:+.2f}"
         for n in counting:
             c = results[n]["count_estimate"]
-            lines.append(f"| {n} | {results[n].get('model_passes', float('nan')):.1f} | " + " | ".join(
-                f"{c[b]['median_abs_log2_error']:.2f} / {pct(c[b]['within_2x'])} / {c[b]['median_log2_ratio']:+.2f}" for b in buckets) + " |")
+            lines.append(f"| {n} | " + " | ".join(
+                f"{pct(c[b]['no_valid_sample'])} / {pct(c[b]['within_2x'])} / {ratio(c[b]['median_log2_ratio'])}" for b in buckets) + " |")
 
     disagreements = {n: results[n]["validity_check_disagreements"] for n in names if results[n]["validity_check_disagreements"]}
     lines += ["", f"Validity cross-check: {'all samples agree' if not disagreements else f'DISAGREEMENTS {disagreements}'} "
@@ -331,14 +366,14 @@ def main():
         name = os.path.basename(run_dir)
         print(f"Analyzing {name} ({fields['preds'].shape[1]} samples per formula)")
         sub = {k: v[:len(fields["preds"])] if isinstance(v, np.ndarray) else v for k, v in test.items()}
-        results[name] = {"meta": meta, **analyze_run(fields, n, sub, solutions[:len(fields["preds"])], assignments,
+        results[name] = {"meta": meta, **analyze_run(fields, meta, n, sub, solutions[:len(fields["preds"])], assignments,
                                                      np.random.default_rng(args.seed))}
         with open(os.path.join(args.out, f"{name}.json"), "w") as f:
             json.dump(results[name], f, indent=2)
     if not results:
         print("No complete runs to analyze")
         return
-    write_summary(results, args.out)
+    write_summary(results, random_guess(n, test), args.out)
     print(f"\nSaved {args.out}/summary.md")
 
 
