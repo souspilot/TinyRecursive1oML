@@ -9,7 +9,8 @@ the rest spread evenly over the groups 2-3, 4-15, 16-63, 64-255 and 256+. Unsati
 
 The clause density alpha is the ambiguity dial: few clauses leave thousands of solutions, and near the
 satisfiability threshold (alpha ~ 4.27 for large n) a handful. Giving variables (from a random solution) also
-removes solutions, as given queens do in N-Queens.
+removes solutions, as given queens do in N-Queens. Commit-and-re-run decoding (sat_commit_decode.py) reaches inputs with
+nearly every variable given, so --max-given-share 0.95 trains on those too; the test split doesn't change with it.
 
 Writes four datasets sharing the same test split (one row per formula, with label_set holding up to
 --max-stored-solutions solutions drawn uniformly, num_solutions the exact count, and per formula var_shares (the
@@ -49,7 +50,8 @@ class DataProcessConfig(BaseModel):
     num_test: int = 2000
     alpha_min: float = 2.0
     alpha_max: float = 4.5
-    max_given_share: float = 0.25  # each formula gives a uniform number of variables in [0, share * n]
+    max_given_share: float = 0.25  # each training formula gives a uniform number of variables in [0, share * n]
+    test_max_given_share: float = 0.25  # the same for test formulas, kept apart so the test split can stay fixed
     unique_share: float = 1 / 3
     max_stored_solutions: int = 16
     seed: int = 42
@@ -188,7 +190,8 @@ def build_sat_dataset(config: DataProcessConfig):
     rng = np.random.default_rng(config.seed)
     seen = set()
 
-    test = draw_formulas(config, quotas_for(config.num_test, config.unique_share, len(COUNT_BOUNDS)), rng, seen)
+    test_config = config.model_copy(update={"max_given_share": config.test_max_given_share})
+    test = draw_formulas(test_config, quotas_for(config.num_test, config.unique_share, len(COUNT_BOUNDS)), rng, seen)
     train = draw_formulas(config, quotas_for(config.num_train, config.unique_share, len(COUNT_BOUNDS)), rng, seen)
     describe("test", test)
     describe("train", train)

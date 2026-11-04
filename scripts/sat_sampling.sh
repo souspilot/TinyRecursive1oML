@@ -14,6 +14,7 @@ set -o pipefail
 project=${PROJECT:-Sat-16-compare}
 data=${DATA:-data/sat-16-1oml}
 samples=${SAMPLES:-samples/sat_16}
+results=${RESULTS:-results/sat_16}
 gram=gram_kl${GRAM_KL:-0.015}_seed42  # GRAM_KL: the KL_COEF its run was trained with
 batch="--effective_batch_size ${EFFECTIVE_BATCH_SIZE:-7680}"  # As mazes, of similar length; twice this overflows 80 GB
 claims=${samples}/.claims
@@ -71,4 +72,4 @@ done
 if [ ${#failed[@]} -gt 0 ]; then echo "== Failed (see logs/sat_sampling_<name>.log): ${failed[*]}"; exit 1; fi
 # Analyze whatever is complete; with several workers, the last one to finish gives the full summary
 echo "== $(date '+%F %T') Analyzing"
-python scripts/analyze_sat_samples.py --data ${data} --samples ${samples} --out results/sat_16
+python scripts/analyze_sat_samples.py --data ${data} --samples ${samples} --out ${results}
