@@ -29,13 +29,15 @@ import numpy as np
 import torch
 
 from evaluators.maze_utils import PAD, WALL, OPEN, START, GOAL, PATH, ShortestPaths
+from models.losses import token_log_probs
 from sample_predictions import load_split, load_model
 
 MOVES = torch.tensor([(-1, 0), (1, 0), (0, -1), (0, 1)])
 
 
 def model_predictor(model, model_batch: int, device: str, token: int = PATH):
-    """Returns predict(inputs (N, seq_len)) -> (N, seq_len) probability of `token`, running the model to completion."""
+    """Returns predict(inputs (N, seq_len)) -> (N, seq_len) probability of `token`, running the model to completion.
+    Probabilities are those of the model's training loss: softmax overstates the confidence of stablemax-trained logits."""
     one_of_many = getattr(model, "one_of_many", "naive") != "naive"
 
     @torch.inference_mode()
@@ -52,7 +54,7 @@ def model_predictor(model, model_batch: int, device: str, token: int = PATH):
                 carry, _, _, outputs, all_finish = model(carry=carry, batch=batch, return_keys={"logits"})
                 if all_finish:
                     break
-            out.append(torch.softmax(outputs["logits"].float(), dim=-1)[..., token])
+            out.append(token_log_probs(outputs["logits"], model.loss_type).exp()[..., token].float())
         return torch.cat(out)
     return predict
 
@@ -175,7 +177,8 @@ def main():
 
     meta = dict(decoder="walk", checkpoint=args.checkpoint, oracle=args.oracle, data=args.data, num_samples=args.num_samples,
                 mode=args.mode, choice=args.choice, certain=args.certain, halt_steps=args.halt_steps,
-                shard_size=args.shard_size, seed=args.seed, num_queries=num_queries, num_shards=num_shards)
+                shard_size=args.shard_size, seed=args.seed, num_queries=num_queries, num_shards=num_shards,
+                probabilities="training_loss")
     os.makedirs(args.out, exist_ok=True)
     meta_path = os.path.join(args.out, "meta.json")
     if os.path.exists(meta_path):

@@ -257,7 +257,8 @@ def main():
     # Recorded only when set, so directories sampled before these options existed still resume
     meta.update({k: v for k, v in (("halt_steps", args.halt_steps), ("latent_noise", args.latent_noise),
                                    ("init_noise", args.init_noise), ("symmetry", args.symmetry),
-                                   ("sat_views", args.sat_views)) if v})
+                                   ("sat_views", args.sat_views),
+                                   ("probabilities", "training_loss" if args.temperature > 0 else None)) if v})
     os.makedirs(args.out, exist_ok=True)
     meta_path = os.path.join(args.out, "meta.json")
     if os.path.exists(meta_path):

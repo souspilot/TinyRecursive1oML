@@ -139,7 +139,8 @@ def main():
 
     meta = dict(decoder="commit", checkpoint=args.checkpoint, oracle=args.oracle, data=args.data,
                 num_samples=args.num_samples, choice=args.choice, order=args.order, certain=args.certain,
-                shard_size=args.shard_size, seed=args.seed, num_queries=num_queries, num_shards=num_shards)
+                shard_size=args.shard_size, seed=args.seed, num_queries=num_queries, num_shards=num_shards,
+                probabilities="training_loss")
     os.makedirs(args.out, exist_ok=True)
     meta_path = os.path.join(args.out, "meta.json")
     if os.path.exists(meta_path):

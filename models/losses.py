@@ -230,7 +230,7 @@ class ACTLossHead(nn.Module):
             # Preds - sample if temperature > 0 during inference, else greedy
             temperature = getattr(self.model.config, 'temperature', 0.0)
             if not self.model.training and temperature > 0.0:
-                probs = torch.softmax(outputs["logits"], dim=-1)
+                probs = token_log_probs(outputs["logits"], self.loss_type).exp()
                 outputs["preds"] = torch.multinomial(probs.view(-1, probs.shape[-1]), num_samples=1).view(probs.shape[:-1])
             else:
                 outputs["preds"] = torch.argmax(outputs["logits"], dim=-1)

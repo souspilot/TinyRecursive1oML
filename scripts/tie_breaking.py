@@ -43,6 +43,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evaluators.maze_utils import ShortestPaths, batch_verify_maze, PAD, WALL, OPEN, START, GOAL, PATH  # noqa: E402
 from evaluators.nqueens_utils import verify_nqueens  # noqa: E402
+from models.losses import token_log_probs  # noqa: E402
 from sample_predictions import load_split, load_model, noisy_init  # noqa: E402
 
 QUEEN = 2
@@ -185,7 +186,7 @@ def step_probs(model, inputs, token, model_batch, device, init_noise=0.0, seed=0
             steps = []
             while True:
                 carry, _, _, outputs, all_finish = model(carry=carry, batch=batch, return_keys={"logits"})
-                steps.append(torch.softmax(outputs["logits"].float(), -1)[..., token].cpu())
+                steps.append(token_log_probs(outputs["logits"], model.loss_type).exp()[..., token].float().cpu())
                 if all_finish:
                     break
             out.append(torch.stack(steps))
