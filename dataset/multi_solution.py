@@ -46,11 +46,13 @@ def draw(generate_chunk: Callable, task_args, quotas, bounds, rng: np.random.Gen
          chunk: int = 200, desc: str = "Drawing inputs"):
     """Examples until every solution-count group has its quota, generated in parallel but deterministically."""
     filled = [[] for _ in quotas]
+    stalled_rounds = 0
     with Pool(cpu_count()) as pool, tqdm(total=sum(quotas), desc=desc) as bar:
         # Rounds of chunks with seeds drawn up front, so the result doesn't depend on the number of processes
         while not all(len(f) >= q for f, q in zip(filled, quotas)):
             needed = tuple(len(f) < q for f, q in zip(filled, quotas))
             tasks = [(int(rng.integers(2**63)), task_args, chunk, needed) for _ in range(64)]
+            added = 0
             for results in pool.imap(generate_chunk, tasks):
                 for example in results:
                     g = count_group(example["num_solutions"], bounds)
@@ -59,6 +61,15 @@ def draw(generate_chunk: Callable, task_args, quotas, bounds, rng: np.random.Gen
                         seen_inputs.add(key)
                         filled[g].append(example)
                         bar.update(1)
+                        added += 1
+            # Fail instead of hanging when a group has run out of distinct inputs
+            stalled_rounds = 0 if added else stalled_rounds + 1
+            if stalled_rounds >= 20:
+                lows = [1] + [b + 1 for b in bounds[:-1]]
+                short = ", ".join(f"{lo}-{hi} solutions: {len(f)}/{q}" for lo, hi, f, q in zip(lows, bounds, filled, quotas)
+                                  if len(f) < q)
+                raise RuntimeError(f"{desc}: no new inputs in 20 rounds of {64 * chunk} candidates; groups short of "
+                                   f"their quota ({short}). Lower the quota or merge these groups.")
     examples = [e for group in filled for e in group]
     rng.shuffle(examples)
     return examples

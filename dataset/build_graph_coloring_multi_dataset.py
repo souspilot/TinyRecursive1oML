@@ -56,11 +56,17 @@ def canonical_colorings(n: int, k: int) -> np.ndarray:
 
 
 def bounds_for(n: int, k: int):
-    """Inclusive upper bounds of the solution-count groups: 1, 2-3, 4-15, then x4 up to the most possible."""
+    """Inclusive upper bounds of the solution-count groups: 1, 2-3, 4-15, then x4 up to 1023, then the rest.
+
+    The top group is open-ended because few graphs have that many colourings: each edge removes about a third of
+    them, so on 10 nodes only the ~1000 graphs with at most 2 edges reach 4096, too few to fill a quota.
+    """
     most = len(canonical_colorings(n, k))
     bounds = [1, 3, 15]
-    while bounds[-1] < most:
+    while bounds[-1] < min(1023, most):
         bounds.append(min(4 * bounds[-1] + 3, most))
+    if bounds[-1] < most:
+        bounds.append(most)
     return tuple(bounds)
 
 
