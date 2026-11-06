@@ -64,6 +64,9 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
     latent_dim: int = 256
     kl_coef: float = 0.1
     use_mlp_sampler: bool = False  # Use MLP for prior/posterior instead of linear projection
+    # Where training latents come from: "posterior" (GRAM: q(z|x, y), which sees the label) or "prior" (p(z|x), as at
+    # test time, so the label never reaches the latent; no KL term, pair with a best-of-K loss over rollouts)
+    train_latent: str = "posterior"
 
     # Variational sampling control (for ablation)
     fix_mu: bool = False  # If True, force mu = 0 (both prior and posterior)
@@ -428,7 +431,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                 puzzle_emb = z_H[:, :self.puzzle_emb_len]
                 h_t = z_H[:, self.puzzle_emb_len:]
 
-                if self.training:
+                if self.training and self.config.train_latent == "posterior":
                     if self.config.use_patchify:
                         y_tar = self._get_label_embedding(batch["labels"])
                     else:
@@ -459,7 +462,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         vae_outputs['prior_mu'] = prior_mu
         vae_outputs['prior_logvar'] = prior_logvar
 
-        if self.training:
+        if self.training and self.config.train_latent == "posterior":
             # Sample from posterior q(z|h_T, y_tar)
             if self.config.use_patchify:
                 y_tar = self._get_label_embedding(batch["labels"])
@@ -506,6 +509,7 @@ class GenerativeRecursiveReasoningModel(nn.Module):
     def __init__(self, config_dict: dict):
         super().__init__()
         self.config = GenerativeRecursiveReasoningModelConfig(**config_dict)
+        assert self.config.train_latent in ("posterior", "prior"), f"train_latent must be posterior or prior, got {self.config.train_latent}"
         print("Initializing GRAM with config:", self.config)
         self.inner = GenerativeRecursiveReasoningModelInner(self.config)
 

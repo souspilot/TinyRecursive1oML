@@ -43,7 +43,7 @@ def token_log_probs(logits, loss_type: str):
     return F.log_softmax(logits.to(torch.float32), dim=-1)
 
 
-ONE_OF_MANY_METHODS = ("naive", "minloss", "iexplr", "selectr", "setmatch")
+ONE_OF_MANY_METHODS = ("naive", "minloss", "iexplr", "selectr", "setmatch", "bestofk")
 
 
 class TargetSelector(nn.Module):
@@ -103,8 +103,11 @@ class ACTLossHead(nn.Module):
         self.one_of_many = one_of_many
         self.selectr_pretrain_steps = selectr_pretrain_steps
         # Training rollouts per example, side by side in the batch (pretrain's `rollouts`). setmatch spreads an
-        # example's rollouts over its stored solutions, one to one, as evenly as possible
+        # example's rollouts over its stored solutions, one to one, as evenly as possible. bestofk trains only the
+        # rollout closest to any stored solution (best-of-many, Bhattacharyya et al. 2018), i.e. MinLoss over both
+        # rollouts and solutions; with prior latents (gram train_latent=prior) the label never reaches the latent
         self.rollouts = rollouts
+        assert one_of_many != "bestofk" or rollouts > 1, "bestofk needs rollouts > 1"
         if one_of_many == "selectr":
             self.selector = TargetSelector(model.config.vocab_size, model.config.seq_len,
                                            selectr_hidden_size, selectr_layers, selectr_heads)
@@ -211,6 +214,14 @@ class ACTLossHead(nn.Module):
                     target_weights = minloss_weights
                 elif self.one_of_many == "setmatch":
                     target_weights = self.setmatch_weights(target_losses, target_valid)
+                elif self.one_of_many == "bestofk":
+                    # Each rollout's closest solution, then only the best rollout of each example trains. Its weight
+                    # is K, so each example's reconstruction loss has the same scale as with one rollout, against
+                    # the halting loss that every rollout still gets
+                    k = self.rollouts
+                    best = torch.where(target_valid, target_losses, torch.inf).min(-1).values.view(-1, k)
+                    chosen = F.one_hot(best.argmin(-1), k).view(-1).to(target_losses.dtype)
+                    target_weights = minloss_weights * (k * chosen).unsqueeze(-1)
                 elif self.one_of_many == "iexplr":
                     # Sample a target with the probability the model assigns to it (Gumbel-max)
                     log_likelihood = torch.where(target_valid, -target_losses * target_counts, -torch.inf)
@@ -223,8 +234,10 @@ class ACTLossHead(nn.Module):
                     new_carry.current_data["inputs"], outputs["logits"], torch.argmax(outputs["logits"], dim=-1).detach(),
                     label_set, target_valid, minloss_weights)
 
-            # Token-level metrics use the most-weighted target
-            labels = torch.gather(label_set, 1, target_weights.argmax(-1).view(-1, 1, 1).expand(-1, 1, label_set.shape[-1])).squeeze(1)
+            # Token-level metrics use the most-weighted target (bestofk: each rollout's own closest target, since the
+            # rollouts that don't train have no weight)
+            metric_weights = minloss_weights if self.one_of_many == "bestofk" else target_weights
+            labels = torch.gather(label_set, 1, metric_weights.argmax(-1).view(-1, 1, 1).expand(-1, 1, label_set.shape[-1])).squeeze(1)
 
         with torch.no_grad():
             # Preds - sample if temperature > 0 during inference, else greedy
