@@ -306,18 +306,18 @@ def check_data(task_name, data_path, max_queries):
             "stored <= solution count": (num_stored <= n).mean(),
             f"stored = min(solutions, {slots})": (num_stored == np.minimum(n, slots)).mean(),
         }
-        seen[split] = {row.tobytes() for row in x}
+        seen[split] = {row.tobytes() for row in np.asarray(inputs)}  # all inputs, whatever max_queries
         print(f"{data_path} {split}: {q} of {len(inputs)} inputs, {filled.sum()} stored solutions, "
-              f"solution counts {int(n.min())}-{int(n.max())}")
+              f"solution counts {int(n.min())}-{int(n.max())}", flush=True)
         for lo, hi in COUNT_BUCKETS:
             print(f"  {bucket_name(lo, hi):>7} solutions: {int(((n >= lo) & (n <= hi)).sum())} inputs")
         for name, rate in checks.items():
             status = "ok" if rate == 1 else "FAIL"
             ok_all &= rate == 1
-            print(f"  [{status}] {name}: {100 * rate:.3f}%")
+            print(f"  [{status}] {name}: {100 * rate:.3f}%", flush=True)
     shared = len(seen["train"] & seen["test"])
     ok_all &= shared == 0
-    print(f"  [{'ok' if shared == 0 else 'FAIL'}] test inputs also in train (among those checked): {shared}")
+    print(f"  [{'ok' if shared == 0 else 'FAIL'}] test inputs also in train: {shared}", flush=True)
     return ok_all
 
 
@@ -330,7 +330,9 @@ def main():
     parser.add_argument("--check_data", action="store_true",
                         help="Only check the dataset itself (stored solutions valid and distinct, counts consistent, "
                              "no train/test overlap); no samples needed")
-    parser.add_argument("--max_queries", type=int, default=10**9, help="With --check_data: inputs checked per split")
+    parser.add_argument("--max_queries", type=int, default=10**9,
+                        help="With --check_data: inputs whose stored solutions are checked, per split (training inputs are "
+                             "in random order, so the first ones are a fair sample); the train/test overlap uses all inputs")
     args = parser.parse_args()
     if args.check_data:
         sys.exit(0 if check_data(args.task, args.data, args.max_queries) else 1)
