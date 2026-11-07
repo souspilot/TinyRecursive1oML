@@ -67,6 +67,9 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
     # Where training latents come from: "posterior" (GRAM: q(z|x, y), which sees the label) or "prior" (p(z|x), as at
     # test time, so the label never reaches the latent; no KL term, pair with a best-of-K loss over rollouts)
     train_latent: str = "posterior"
+    # Prior p(z|x): "learned" (mean and log-variance from h, as in GRAM) or "standard" (N(0, I), no parameters, so
+    # nothing can drift; z_proj still learns the noise covariance). With train_latent=prior this is IMLE-style noise.
+    prior_noise: str = "learned"
 
     # Variational sampling control (for ablation)
     fix_mu: bool = False  # If True, force mu = 0 (both prior and posterior)
@@ -88,9 +91,11 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
 class VariationalLayer(nn.Module):
     """Variational layer with optional MLP encoders"""
     def __init__(self, hidden_size: int, latent_dim: int, vocab_size: int, use_mlp: bool = False, expansion: float = 2.0,
-                 fix_mu: bool = False, fix_std: bool = False, posterior_y_dim: int = None):
+                 fix_mu: bool = False, fix_std: bool = False, posterior_y_dim: int = None, standard_prior: bool = False):
         super().__init__()
         self.use_mlp = use_mlp
+        self.latent_dim = latent_dim
+        self.standard_prior = standard_prior
         self.fix_mu = fix_mu
         self.fix_std = fix_std
         # posterior_y_dim: dimension of y input for posterior (default: vocab_size, or hidden_size for patchify)
@@ -126,7 +131,9 @@ class VariationalLayer(nn.Module):
         B, N, D = x.shape
         h = x.reshape(B * N, D).to(torch.float32)  # (B*N, D)
 
-        if self.use_mlp:
+        if self.standard_prior:
+            mu = logvar = torch.zeros(B * N, self.latent_dim, dtype=torch.float32, device=x.device)  # N(0, I)
+        elif self.use_mlp:
             mlp_out = self.prior_mlp(h)  # (B*N, 2*latent_dim)
             mu, logvar = mlp_out.chunk(2, dim=-1)  # Each (B*N, latent_dim)
         else:
@@ -283,7 +290,8 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
             use_mlp=self.config.use_mlp_sampler,
             fix_mu=self.config.fix_mu,
             fix_std=self.config.fix_std,
-            posterior_y_dim=posterior_y_dim
+            posterior_y_dim=posterior_y_dim,
+            standard_prior=self.config.prior_noise == "standard",
         )
 
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
@@ -510,6 +518,7 @@ class GenerativeRecursiveReasoningModel(nn.Module):
         super().__init__()
         self.config = GenerativeRecursiveReasoningModelConfig(**config_dict)
         assert self.config.train_latent in ("posterior", "prior"), f"train_latent must be posterior or prior, got {self.config.train_latent}"
+        assert self.config.prior_noise in ("learned", "standard"), f"prior_noise must be learned or standard, got {self.config.prior_noise}"
         print("Initializing GRAM with config:", self.config)
         self.inner = GenerativeRecursiveReasoningModelInner(self.config)
 

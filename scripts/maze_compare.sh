@@ -12,6 +12,8 @@
 #   gram_prior_bestofk  GRAM's architecture trained with prior latents only, so the label never reaches the latent
 #                 (no posterior, no KL, no beta): ROLLOUTS prior samples per maze (default 8), and only the one
 #                 closest to a stored path trains (best-of-K). Same 768 sequences per step, so 768 / ROLLOUTS mazes
+#   gram_std_bestofk    as gram_prior_bestofk, but the latent is N(0, I) noise rather than a learned prior (IMLE-style;
+#                 the learned prior's unbounded variance diverged on graph colouring)
 #   trm           TRM on one random stored path per maze each epoch   (1oML "Naive")
 #   trm_random    TRM on one fixed random path per maze               (1oML "Random")
 #   trm_unique    TRM on mazes with a unique shortest path only       (1oML "Unique")
@@ -52,10 +54,11 @@ case $method in
   gram_budget)
     data=${root}
     arch_args="${gram_args/arch.kl_coef=${KL_COEF:-0.07}/arch.kl_coef=${KL_COEF:-0.05}} arch.kl_budget=${KL_BUDGET:-1.0}" ;;
-  gram_prior_bestofk)
+  gram_prior_bestofk|gram_std_bestofk)
     rollouts=${ROLLOUTS:-8}
     data=${root}-1oml
-    arch_args="${gram_args} arch.train_latent=prior arch.loss.one_of_many=bestofk +rollouts=${rollouts}" ;;
+    arch_args="${gram_args} arch.train_latent=prior arch.loss.one_of_many=bestofk +rollouts=${rollouts}"
+    [ "${method}" = gram_std_bestofk ] && arch_args="${arch_args} arch.prior_noise=standard" ;;
   trm)         data=${root}        arch_args="${trm_args}" ;;
   trm_random)  data=${root}-single arch_args="${trm_args}" ;;
   trm_unique)  data=${root}-unique arch_args="${trm_args}" ;;
@@ -89,7 +92,7 @@ if [ ${rollouts} -gt 1 ]; then
 fi
 
 run=${method}_seed${SEED:-42}
-if [ -n "${KL_COEF}" ] && [[ ${method} == gram* ]] && [ "${method}" != gram_prior_bestofk ]; then
+if [ -n "${KL_COEF}" ] && [[ ${method} == gram* ]] && [[ ${method} != gram_*_bestofk ]]; then
   run=${method}_kl${KL_COEF}_seed${SEED:-42}
 fi
 if [ -n "${KL_BUDGET}" ] && [ "${method}" = gram_budget ]; then

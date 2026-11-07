@@ -41,6 +41,7 @@ free_bits: null # free bits for KL loss (null=disabled, e.g., 0.1=minimum KL per
 kl_budget: null # per-example KL budget: KL up to kl_budget * ln(num_solutions) nats is free (null=disabled, 1.0=enough to pick one solution)
 use_mlp_sampler: true # use MLP encoders for prior/posterior (False=linear projection, True=SwiGLU MLP)
 train_latent: posterior # training latents from the posterior (GRAM) or the prior (no label in the latent, no KL; pair with loss.one_of_many=bestofk)
+prior_noise: learned # prior p(z|x): learned (GRAM) or standard (N(0, I), no parameters; for train_latent=prior)
 fix_mu: False # if True, force mu = 0 for both prior and posterior (ablation)
 fix_std: False # if True, force std = 0 for both prior and posterior, deterministic (ablation)
 
