@@ -1,9 +1,11 @@
 #!/bin/bash
-# Sample a trained run on one of the five multi-solution datasets and score it with scripts/analyze_multi_samples.py.
+# Evaluate a run trained with scripts/multi_compare.sh: draw SAMPLES answers per input from the model, each with a
+# fresh random latent (sample_predictions.py), then score them all with scripts/analyze_multi_samples.py (validity,
+# diversity against a uniform sampler, error anatomy and, on the train split, held-out solutions).
 #
-# Usage: bash scripts/multi_sample.sh <maze|nqueens|sudoku|graph|sat> <run> [test|train]
-#   e.g. bash scripts/multi_sample.sh sudoku gram_prior_bestofk_seed42
-#        bash scripts/multi_sample.sh graph gram_prior_bestofk_seed42 train   (held-out solutions on training inputs)
+# Usage: bash scripts/multi_evaluate.sh <maze|nqueens|sudoku|graph|sat> <run> [test|train]
+#   e.g. bash scripts/multi_evaluate.sh sudoku gram_prior_bestofk_seed42
+#        bash scripts/multi_evaluate.sh graph gram_prior_bestofk_seed42 train   (held-out solutions on training inputs)
 #
 # SAMPLES per input (default 100). QUERIES limits the inputs (default: all 2000 test inputs; the first 2000 training
 # inputs for train, which are in random order). STEP picks a checkpoint other than the final one (e.g. STEP=41660 for
