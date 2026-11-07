@@ -1,6 +1,7 @@
 """Score samples from sample_predictions.py on the five multi-solution datasets with one set of metrics.
 
 Usage: python scripts/analyze_multi_samples.py --task sudoku --data data/sudoku-multi-1oml --samples samples/sudoku --out results/sudoku
+       python scripts/analyze_multi_samples.py --task sudoku --data data/sudoku-multi-1oml --check_data   (dataset only)
 
 --data is the -1oml dataset the samples came from (its label_set holds each input's stored solutions); each run in
 --samples is a directory with meta.json and shards, sampled from the split named in its meta.json (test by default).
@@ -281,13 +282,60 @@ def write_summary(results, out_dir):
     print("\n".join(lines))
 
 
+def check_data(task_name, data_path, max_queries):
+    """Check a -1oml dataset with the same checkers the samples are scored with: every stored solution valid,
+    distinct and no more than the input's solution count, stored = min(solutions, slots), and no input shared
+    between train and test. Prints a report and returns True when everything passes."""
+    ok_all = True
+    seen = {}
+    for split in ("train", "test"):
+        metadata, inputs, label_set, num_solutions = load_split(data_path, split)
+        q = min(len(inputs), max_queries)
+        task = Task(task_name, metadata["seq_len"], metadata["vocab_size"])
+        x, ls, n = np.asarray(inputs[:q]), np.asarray(label_set[:q]), num_solutions[:q]
+        filled = (ls != 0).any(-1)
+        num_stored = filled.sum(1)
+        valid = task.valid(x, ls)
+        answers = task.answer(ls)
+        distinct = np.array([len(np.unique(a[f], axis=0)) for a, f in zip(answers, filled)])
+        slots = ls.shape[1]
+        checks = {
+            "every input has a stored solution": (num_stored >= 1).mean(),
+            "stored solutions valid": valid[filled].mean(),
+            "stored solutions distinct": (distinct == num_stored).mean(),
+            "stored <= solution count": (num_stored <= n).mean(),
+            f"stored = min(solutions, {slots})": (num_stored == np.minimum(n, slots)).mean(),
+        }
+        seen[split] = {row.tobytes() for row in x}
+        print(f"{data_path} {split}: {q} of {len(inputs)} inputs, {filled.sum()} stored solutions, "
+              f"solution counts {int(n.min())}-{int(n.max())}")
+        for lo, hi in COUNT_BUCKETS:
+            print(f"  {bucket_name(lo, hi):>7} solutions: {int(((n >= lo) & (n <= hi)).sum())} inputs")
+        for name, rate in checks.items():
+            status = "ok" if rate == 1 else "FAIL"
+            ok_all &= rate == 1
+            print(f"  [{status}] {name}: {100 * rate:.3f}%")
+    shared = len(seen["train"] & seen["test"])
+    ok_all &= shared == 0
+    print(f"  [{'ok' if shared == 0 else 'FAIL'}] test inputs also in train (among those checked): {shared}")
+    return ok_all
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--task", required=True, choices=TASKS)
     parser.add_argument("--data", required=True, help="The -1oml dataset the samples came from")
-    parser.add_argument("--samples", required=True, help="Directory of runs (each with meta.json and shards), or one run")
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--samples", help="Directory of runs (each with meta.json and shards), or one run")
+    parser.add_argument("--out")
+    parser.add_argument("--check_data", action="store_true",
+                        help="Only check the dataset itself (stored solutions valid and distinct, counts consistent, "
+                             "no train/test overlap); no samples needed")
+    parser.add_argument("--max_queries", type=int, default=10**9, help="With --check_data: inputs checked per split")
     args = parser.parse_args()
+    if args.check_data:
+        sys.exit(0 if check_data(args.task, args.data, args.max_queries) else 1)
+    if not (args.samples and args.out):
+        parser.error("--samples and --out are required unless --check_data")
     os.makedirs(args.out, exist_ok=True)
 
     run_dirs = [args.samples] if os.path.exists(os.path.join(args.samples, "meta.json")) else \
