@@ -21,7 +21,11 @@ Reported per run, for all inputs and per group of solution counts (1, 2-3, 4-15,
    solutions rather than an error of their own. Stored solutions are at most 16 per input, so both are bounds.
 5. Held-out solutions (train split only): among valid samples on inputs with more solutions than stored, the share
    not among the stored ones, against a uniform sampler's 1 - stored / solutions. Near 0 = only reproduces what it
-   was trained on; near the uniform share = produces unseen solutions as readily as seen ones.
+   was trained on; near the uniform share = produces unseen solutions as readily as seen ones. Also per group of
+   solution counts, and the share of unseen valid samples whose every cell agrees with some stored solution
+   (a recombination of training targets rather than a solution with cells it never saw on that input). Read the
+   recombined share against a uniform sampler's, not against 0: with 16 stored solutions most cell values are
+   already covered (uniform sampling over all graph colourings scores ~97%).
 
 Writes <out>/<run>.json and <out>/summary.md.
 """
@@ -217,7 +221,21 @@ def analyze_run(task, preds, inputs, label_set, num_solutions, split):
                 "uniform_unseen_share": float(np.average(uniform_share, weights=v[held].sum(1)) if v[held].sum() else uniform_share.mean()),
                 "queries_with_unseen_valid": float(novel[held].any(1).mean()),
                 "distinct_unseen_per_query": float(np.mean([len(np.unique(i[n])) for i, n in zip(ids[held], novel[held])])),
+                "recombined_share_of_unseen": float((novel & union).sum() / novel.sum()) if novel.any() else None,
+                "by_group": {},
             }
+            for lo, hi in COUNT_BUCKETS:
+                m = held & (num_solutions >= lo) & (num_solutions <= hi)
+                vm = v & m[:, None]
+                if not vm.any():
+                    continue
+                nm = novel & m[:, None]
+                result["held_out"]["by_group"][bucket_name(lo, hi)] = {
+                    "queries": int(m.sum()),
+                    "unseen_share_of_valid": float(nm.sum() / vm.sum()),
+                    "uniform_unseen_share": float(np.average(1 - num_stored[m] / num_solutions[m], weights=vm[m].sum(1))),
+                    "recombined_share_of_unseen": float((nm & union).sum() / nm.sum()) if nm.any() else None,
+                }
     return result
 
 
@@ -249,7 +267,14 @@ def write_summary(results, out_dir):
         if h:
             lines.append(f"Held-out solutions ({h['queries']} inputs): {pct(h['unseen_share_of_valid'])}% of valid samples are unseen "
                          f"(uniform: {pct(h['uniform_unseen_share'])}%); {pct(h['queries_with_unseen_valid'])}% of inputs get one; "
-                         f"{h['distinct_unseen_per_query']:.2f} distinct unseen per input.")
+                         f"{h['distinct_unseen_per_query']:.2f} distinct unseen per input; "
+                         f"{pct(h.get('recombined_share_of_unseen'))}% of unseen valid samples are recombinations of stored ones.")
+            if h.get("by_group"):
+                lines += ["", "| solutions (held-out inputs) | inputs | unseen share of valid | uniform | recombined |",
+                          "|---|---|---|---|---|"]
+                for name, b in h["by_group"].items():
+                    lines.append(f"| {name} | {b['queries']} | {pct(b['unseen_share_of_valid'])} | "
+                                 f"{pct(b['uniform_unseen_share'])} | {pct(b['recombined_share_of_unseen'])} |")
         lines.append("")
     with open(os.path.join(out_dir, "summary.md"), "w") as f:
         f.write("\n".join(lines))
