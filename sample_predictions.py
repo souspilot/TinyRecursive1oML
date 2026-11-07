@@ -8,6 +8,7 @@ result doesn't depend on how many processes or jobs produced it.
 Usage:
     torchrun --nproc-per-node 2 sample_predictions.py --checkpoint checkpoints/<project>/<run>/final/checkpoint.pt \\
         --data data/nqueens-10-1oml --num_samples 100 --out samples/nqueens_10/<run>
+    (several splits with one model load: --split test,train --out samples/nqueens-{split}/<run>)
 
 Output: <out>/meta.json and <out>/shard_<i>.npz with `query_start`, `preds` (queries x samples x seq_len, uint8)
 and `q` (the halting head's final logit per sample, the model's own estimate that its answer is correct).
@@ -221,37 +222,15 @@ def sample(model, batch, num_samples: int, device: str, latent_noise: float = 0.
     return preds.view(queries, num_samples, -1), outputs["q_halt_logits"].float().view(queries, num_samples)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--data", required=True, help="Dataset directory; its test split is sampled (see --split)")
-    parser.add_argument("--split", default="test", help="Split to sample: test, or train (e.g. to look for solutions held out of training)")
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--num_samples", type=int, default=1)
-    parser.add_argument("--temperature", type=float, default=0.0, help="Per-cell sampling temperature (TRM); 0 = argmax")
-    parser.add_argument("--shard_size", type=int, default=512, help="Test queries per shard")
-    parser.add_argument("--effective_batch_size", type=int, default=15360, help="Queries x samples per forward pass")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--halt_steps", type=int, default=None, help="Recursion steps per sample (default: as trained)")
-    parser.add_argument("--latent_noise", type=float, default=0.0, help="Scale of Gaussian noise added to z_L per step")
-    parser.add_argument("--init_noise", type=float, default=0.0, help="Scale of Gaussian noise added to the initial latent")
-    parser.add_argument("--symmetry", action="store_true", help="Sample j decodes the board under the j-th of 8 symmetries")
-    parser.add_argument("--sat_views", action="store_true",
-                        help="3-SAT: samples after the first decode the formula with variables renamed and negated, clauses reordered")
-    parser.add_argument("--max_queries", type=int, default=None, help="Sample only the first queries (for quick checks)")
-    args = parser.parse_args()
+# Tokens per forward pass (queries x samples x positions) that fit an 80GB A100 with room to spare: the default
+# --effective_batch_size is this divided by the sequence length (with the puzzle embedding positions)
+TOKENS_PER_PASS = 1_500_000
 
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
-        device = f"cuda:{local_rank}"
-    else:
-        device = "cpu"
 
-    data, metadata = load_split(args.data, args.split)
-    num_queries = len(data["inputs"]) if args.max_queries is None else min(args.max_queries, len(data["inputs"]))
+def sample_split(args, split, out, max_queries, rank, world_size, device, get_model):
+    """Sample one split into resumable shards at out; get_model() loads the model on first use."""
+    data, metadata = load_split(args.data, split)
+    num_queries = len(data["inputs"]) if max_queries is None else min(max_queries, len(data["inputs"]))
     num_shards = math.ceil(num_queries / args.shard_size)
 
     # The settings that determine the samples; a rerun with different ones must not mix with existing shards
@@ -261,33 +240,32 @@ def main():
     meta.update({k: v for k, v in (("halt_steps", args.halt_steps), ("latent_noise", args.latent_noise),
                                    ("init_noise", args.init_noise), ("symmetry", args.symmetry),
                                    ("sat_views", args.sat_views),
-                                   ("split", args.split if args.split != "test" else None),
+                                   ("split", split if split != "test" else None),
                                    ("probabilities", "training_loss" if args.temperature > 0 else None)) if v})
-    os.makedirs(args.out, exist_ok=True)
-    meta_path = os.path.join(args.out, "meta.json")
+    os.makedirs(out, exist_ok=True)
+    meta_path = os.path.join(out, "meta.json")
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             existing = json.load(f)
         mismatched = {k: (existing.get(k), v) for k, v in meta.items() if existing.get(k) != v}
         if mismatched:
-            raise ValueError(f"{args.out} holds samples made with other settings (existing, requested): {mismatched}. "
+            raise ValueError(f"{out} holds samples made with other settings (existing, requested): {mismatched}. "
                              f"Use another --out or delete it.")
     else:
         with open(f"{meta_path}.tmp{rank}", "w") as f:
             json.dump(meta, f, indent=2)
         os.replace(f"{meta_path}.tmp{rank}", meta_path)
 
-    shard_path = lambda i: os.path.join(args.out, f"shard_{i:05d}.npz")
+    shard_path = lambda i: os.path.join(out, f"shard_{i:05d}.npz")
     todo = [i for i in range(rank, num_shards, world_size) if not os.path.exists(shard_path(i))]
-    print(f"[rank {rank}/{world_size}] {args.out}: {len(todo)} of {len(range(rank, num_shards, world_size))} shards to sample")
+    print(f"[rank {rank}/{world_size}] {out}: {len(todo)} of {len(range(rank, num_shards, world_size))} shards to sample",
+          flush=True)
     if not todo:
         return
 
-    model, step = load_model(args.checkpoint, metadata, args.temperature, device)
-    if args.halt_steps is not None:
-        model.model.config.halt_max_steps = args.halt_steps
-    print(f"[rank {rank}] Loaded {args.checkpoint} (step {step}) on {device}")
-    queries_per_pass = max(1, args.effective_batch_size // args.num_samples)
+    model = get_model(metadata)
+    batch_size = args.effective_batch_size or max(args.num_samples, TOKENS_PER_PASS // (metadata.seq_len + 16))
+    queries_per_pass = max(1, batch_size // args.num_samples)
     sat_vars = (metadata.vocab_size - 3) // 3 if args.sat_views else 0
 
     for done, shard in enumerate(todo, 1):
@@ -308,6 +286,61 @@ def main():
             np.savez(f, query_start=start, preds=preds, q=q)
         os.replace(tmp_path, shard_path(shard))
         print(f"[rank {rank}] shard {shard} (queries {start}-{end - 1}) saved, {done}/{len(todo)}", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--data", required=True, help="Dataset directory; its test split is sampled (see --split)")
+    parser.add_argument("--split", default="test",
+                        help="Split(s) to sample, comma-separated: test, train (e.g. to look for solutions held out of "
+                             "training), or both (test,train); the model is loaded once for all of them")
+    parser.add_argument("--out", required=True,
+                        help="Output directory; with several splits it must contain {split}")
+    parser.add_argument("--num_samples", type=int, default=1)
+    parser.add_argument("--temperature", type=float, default=0.0, help="Per-cell sampling temperature (TRM); 0 = argmax")
+    parser.add_argument("--shard_size", type=int, default=512, help="Test queries per shard")
+    parser.add_argument("--effective_batch_size", type=int, default=None,
+                        help=f"Queries x samples per forward pass (default: {TOKENS_PER_PASS:,} tokens / sequence length)")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--halt_steps", type=int, default=None, help="Recursion steps per sample (default: as trained)")
+    parser.add_argument("--latent_noise", type=float, default=0.0, help="Scale of Gaussian noise added to z_L per step")
+    parser.add_argument("--init_noise", type=float, default=0.0, help="Scale of Gaussian noise added to the initial latent")
+    parser.add_argument("--symmetry", action="store_true", help="Sample j decodes the board under the j-th of 8 symmetries")
+    parser.add_argument("--sat_views", action="store_true",
+                        help="3-SAT: samples after the first decode the formula with variables renamed and negated, clauses reordered")
+    parser.add_argument("--max_queries", type=int, default=None, help="Sample only the first queries (for quick checks)")
+    parser.add_argument("--max_train_queries", type=int, default=None,
+                        help="As --max_queries, for the train split only (e.g. 2000 of 100k training inputs)")
+    args = parser.parse_args()
+    splits = [s for s in args.split.split(",") if s]
+    if len(splits) > 1 and "{split}" not in args.out:
+        parser.error("with several splits, --out must contain {split}")
+
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+    else:
+        device = "cpu"
+
+    loaded = {}
+
+    def get_model(metadata):
+        # Splits of one dataset share vocabulary and sequence length, so one model serves them all
+        if "model" not in loaded:
+            model, step = load_model(args.checkpoint, metadata, args.temperature, device)
+            if args.halt_steps is not None:
+                model.model.config.halt_max_steps = args.halt_steps
+            print(f"[rank {rank}] Loaded {args.checkpoint} (step {step}) on {device}", flush=True)
+            loaded["model"] = model
+        return loaded["model"]
+
+    for split in splits:
+        max_queries = args.max_train_queries if split == "train" and args.max_train_queries else args.max_queries
+        sample_split(args, split, args.out.replace("{split}", split), max_queries, rank, world_size, device, get_model)
 
 
 if __name__ == "__main__":

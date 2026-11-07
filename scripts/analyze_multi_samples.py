@@ -28,7 +28,8 @@ Reported per run, for all inputs and per group of solution counts (1, 2-3, 4-15,
    recombined share against a uniform sampler's, not against 0: with 16 stored solutions most cell values are
    already covered (uniform sampling over all graph colourings scores ~97%).
 
-Writes <out>/<run>.json and <out>/summary.md.
+Writes <out>/<run>.json and <out>/summary.md. A run whose <run>.json is newer than its samples and from the
+current version of the metrics is read back rather than recomputed (--force recomputes everything).
 """
 import argparse
 import glob
@@ -49,6 +50,8 @@ from evaluators.sudoku_utils import verify_sudoku  # noqa: E402
 TASKS = ("maze", "nqueens", "sudoku", "graph", "sat")
 SAMPLE_COUNTS = (1, 2, 5, 10, 20, 50, 100, 250, 500, 1000)
 COUNT_BUCKETS = ((1, 1), (2, 3), (4, 15), (16, 63), (64, 255), (256, 2**62))
+# Bump when the metrics change, so saved results (<out>/<run>.json) are recomputed rather than reused
+ANALYSIS_VERSION = 2
 
 
 class Task:
@@ -173,7 +176,8 @@ def analyze_run(task, preds, inputs, label_set, num_solutions, split):
     groups = [("all", np.ones(q, dtype=bool))] + [
         (bucket_name(lo, hi), (num_solutions >= lo) & (num_solutions <= hi)) for lo, hi in COUNT_BUCKETS]
     multi = num_solutions > 1
-    result = {"num_queries": int(q), "num_samples": int(s), "split": split, "groups": {}}
+    result = {"analysis_version": ANALYSIS_VERSION, "num_queries": int(q), "num_samples": int(s), "split": split,
+              "groups": {}}
     for name, mask in groups:
         if not mask.any():
             continue
@@ -330,6 +334,8 @@ def main():
     parser.add_argument("--check_data", action="store_true",
                         help="Only check the dataset itself (stored solutions valid and distinct, counts consistent, "
                              "no train/test overlap); no samples needed")
+    parser.add_argument("--force", action="store_true",
+                        help="Recompute every run, even those whose saved results are up to date")
     parser.add_argument("--max_queries", type=int, default=10**9,
                         help="With --check_data: inputs whose stored solutions are checked, per split (training inputs are "
                              "in random order, so the first ones are a fair sample); the train/test overlap uses all inputs")
@@ -344,6 +350,17 @@ def main():
         sorted(os.path.dirname(p) for p in glob.glob(os.path.join(args.samples, "*", "meta.json")))
     results = {}
     for run_dir in run_dirs:
+        run = os.path.basename(os.path.normpath(run_dir))
+        saved = os.path.join(args.out, f"{run}.json")
+        if not args.force and os.path.exists(saved):
+            # Reuse the saved results when they are newer than every sample file and from this version of the metrics
+            newest_sample = max(os.path.getmtime(p) for p in glob.glob(os.path.join(run_dir, "*")))
+            with open(saved) as f:
+                previous = json.load(f)
+            if previous.get("analysis_version") == ANALYSIS_VERSION and os.path.getmtime(saved) > newest_sample:
+                print(f"Up to date: {run} (from {saved})")
+                results[run] = previous
+                continue
         preds, meta = load_run(run_dir)
         if preds is None:
             continue
@@ -351,7 +368,6 @@ def main():
         metadata, inputs, label_set, num_solutions = load_split(args.data, split)
         q = len(preds)
         task = Task(args.task, metadata["seq_len"], metadata["vocab_size"])
-        run = os.path.basename(os.path.normpath(run_dir))
         print(f"Analyzing {run}: {q} {split} inputs x {preds.shape[1]} samples")
         results[run] = analyze_run(task, preds, np.asarray(inputs[:q]), np.asarray(label_set[:q]), num_solutions[:q], split)
         with open(os.path.join(args.out, f"{run}.json"), "w") as f:
