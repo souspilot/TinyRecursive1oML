@@ -92,7 +92,9 @@ def load_model(checkpoint_path: str, metadata: PuzzleDatasetMetadata, temperatur
     )
     with torch.device(device):
         model = load_model_class(config.arch.name)(model_cfg)
-        model = load_model_class(config.arch.loss.name)(model, **config.arch.loss.__pydantic_extra__)
+        # rollouts only matters in training, but best-of-K loss heads check it on construction
+        model = load_model_class(config.arch.loss.name)(model, **config.arch.loss.__pydantic_extra__,
+                                                         rollouts=getattr(config, "rollouts", 1))
 
     strip = lambda state: {k.replace("_orig_mod.", ""): v for k, v in state.items()}
     model.load_state_dict(strip(checkpoint["model"]), assign=True)
@@ -222,7 +224,8 @@ def sample(model, batch, num_samples: int, device: str, latent_noise: float = 0.
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--data", required=True, help="Dataset directory; its test split is sampled")
+    parser.add_argument("--data", required=True, help="Dataset directory; its test split is sampled (see --split)")
+    parser.add_argument("--split", default="test", help="Split to sample: test, or train (e.g. to look for solutions held out of training)")
     parser.add_argument("--out", required=True)
     parser.add_argument("--num_samples", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.0, help="Per-cell sampling temperature (TRM); 0 = argmax")
@@ -247,7 +250,7 @@ def main():
     else:
         device = "cpu"
 
-    data, metadata = load_split(args.data)
+    data, metadata = load_split(args.data, args.split)
     num_queries = len(data["inputs"]) if args.max_queries is None else min(args.max_queries, len(data["inputs"]))
     num_shards = math.ceil(num_queries / args.shard_size)
 
@@ -258,6 +261,7 @@ def main():
     meta.update({k: v for k, v in (("halt_steps", args.halt_steps), ("latent_noise", args.latent_noise),
                                    ("init_noise", args.init_noise), ("symmetry", args.symmetry),
                                    ("sat_views", args.sat_views),
+                                   ("split", args.split if args.split != "test" else None),
                                    ("probabilities", "training_loss" if args.temperature > 0 else None)) if v})
     os.makedirs(args.out, exist_ok=True)
     meta_path = os.path.join(args.out, "meta.json")
