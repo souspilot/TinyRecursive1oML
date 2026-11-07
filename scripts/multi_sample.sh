@@ -7,7 +7,8 @@
 #
 # SAMPLES per input (default 100). QUERIES limits the inputs (default: all 2000 test inputs; the first 2000 training
 # inputs for train, which are in random order). STEP picks a checkpoint other than the final one (e.g. STEP=41660 for
-# checkpoints/<project>/<run>/step_41660). GPUS for torchrun (default 1).
+# checkpoints/<project>/<run>/step_41660). GPUS for torchrun (default 1). BATCH sets queries x samples per forward
+# pass (default 15360; lower it to share a GPU with a training run).
 # Samples go to samples/<dataset>-<split>/<run>[_step<STEP>], results to results/<dataset>-<split>.
 set -e
 dataset=$1
@@ -32,6 +33,6 @@ queries=${QUERIES:-}
 out=samples/${dataset}-${split}/${name}
 torchrun --nproc-per-node ${GPUS:-1} --master-port $((29500 + RANDOM % 1000)) sample_predictions.py \
   --checkpoint "${checkpoint}" --data "${data}" --split "${split}" --num_samples ${SAMPLES:-100} --out "${out}" \
-  ${queries:+--max_queries ${queries}}
+  ${queries:+--max_queries ${queries}} ${BATCH:+--effective_batch_size ${BATCH}}
 python scripts/analyze_multi_samples.py --task ${dataset} --data "${data}" --samples "samples/${dataset}-${split}" \
   --out "results/${dataset}-${split}"
