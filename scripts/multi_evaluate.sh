@@ -19,8 +19,8 @@ dataset=$1
 run=$2
 splits=${3:-test,train}
 case $dataset in
-  maze)    data=data/maze-15-1oml project=Maze-15-compare ;;
-  nqueens) data=data/nqueens-10-s16-1oml project=Nqueens-multi ;;
+  maze)    data=data/maze-multi-1oml project=Maze-multi ;;
+  nqueens) data=data/nqueens-multi-1oml project=Nqueens-multi ;;
   sudoku)  data=data/sudoku-multi-1oml project=Sudoku-multi ;;
   graph)   data=data/graph-coloring-multi-1oml project=Graph-coloring-multi ;;
   *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph)"; exit 1 ;;

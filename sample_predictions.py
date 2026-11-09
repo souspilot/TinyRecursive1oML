@@ -7,7 +7,7 @@ result doesn't depend on how many processes or jobs produced it.
 
 Usage:
     torchrun --nproc-per-node 2 sample_predictions.py --checkpoint checkpoints/<project>/<run>/final/checkpoint.pt \\
-        --data data/nqueens-10-1oml --num_samples 100 --out samples/nqueens_10/<run>
+        --data data/nqueens-multi-1oml --num_samples 100 --out samples/nqueens-test/<run>
     (several splits with one model load: --split test,train --out samples/nqueens-{split}/<run>)
 
 Output: <out>/meta.json and <out>/shard_<i>.npz with `query_start`, `preds` (queries x samples x seq_len, uint8)

@@ -18,10 +18,10 @@ built() { [ -f "$1/test/dataset.json" ] && echo "$1 exists, skipping"; }
 for d in ${datasets}; do
   case $d in
     maze)
-      built data/maze-15-1oml || python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-15 ;;
+      built data/maze-multi-1oml || python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-multi ;;
     nqueens)
       # Two builds with the same seed share the split and the stored solutions
-      base=data/nqueens-10-s16
+      base=data/nqueens-multi
       built ${base} || python dataset/build_nqueens_dataset.py --n 10 --remove-counts 7 8 9 --max-stored-solutions 16 --output-dir ${base}
       built ${base}-1oml || python dataset/build_nqueens_dataset.py --n 10 --remove-counts 7 8 9 --max-stored-solutions 16 --output-dir ${base}-1oml --one-of-many ;;
     sudoku)

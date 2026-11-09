@@ -18,8 +18,8 @@ method=$2
 steps=${STEPS:-150000}
 seed=${SEED:-42}
 case $dataset in
-  maze)    root=data/maze-15 project=Maze-15-compare ;;
-  nqueens) root=data/nqueens-10-s16 project=Nqueens-multi ;;
+  maze)    root=data/maze-multi project=Maze-multi ;;
+  nqueens) root=data/nqueens-multi project=Nqueens-multi ;;
   sudoku)  root=data/sudoku-multi project=Sudoku-multi ;;
   graph)   root=data/graph-coloring-multi project=Graph-coloring-multi ;;
   *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph)"; exit 1 ;;
