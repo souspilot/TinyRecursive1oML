@@ -15,7 +15,7 @@ Writes four datasets sharing the same test split (one row per maze, with label_s
   <out>-unique   train: only mazes with a unique shortest path
 
 Usage:
-    python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-15
+    python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-multi
 """
 import json
 import math
@@ -38,7 +38,7 @@ cli = ArgParser()
 
 class DataProcessConfig(BaseModel):
     size: int = 15
-    output_dir: str = "data/maze-15"
+    output_dir: str = "data/maze-multi"
     num_train: int = 100000
     num_test: int = 2000
     unique_share: float = 1 / 3
