@@ -7,8 +7,8 @@
 #   e.g. bash scripts/multi_evaluate.sh sudoku gram_std_bestofk_seed42            (test and train, one model load)
 #        bash scripts/multi_evaluate.sh graph gram_std_bestofk_seed42 test        (test only)
 #
-# splits: test, train or test,train (default). SAMPLES per input (default 100). QUERIES limits the training inputs
-# (default 2000, the first ones, which are in random order; test always uses all). STEP picks a checkpoint other than
+# splits: comma-separated, any of test, val, train, test_no_val (default test,train). SAMPLES per input (default 100).
+# QUERIES limits the inputs of every split but test (default 2000, the first ones, which are in random order). STEP picks a checkpoint other than
 # the final one (e.g. STEP=41660 for checkpoints/<project>/<run>/step_41660). GPUS for torchrun (default 1). BATCH
 # sets queries x samples per forward pass (default: scaled to the sequence length to fit an 80GB GPU; lower it to
 # share a GPU with a training run).
@@ -33,7 +33,7 @@ checkpoint=checkpoints/${project}/${run}/${step_dir}/checkpoint.pt
 
 torchrun --nproc-per-node ${GPUS:-1} --master-port $((29500 + RANDOM % 1000)) sample_predictions.py \
   --checkpoint "${checkpoint}" --data "${data}" --split "${splits}" --num_samples ${SAMPLES:-100} \
-  --out "samples/${dataset}-{split}/${name}" --max_train_queries ${QUERIES:-2000} ${BATCH:+--effective_batch_size ${BATCH}}
+  --out "samples/${dataset}-{split}/${name}" --max_nontest_queries ${QUERIES:-2000} ${BATCH:+--effective_batch_size ${BATCH}}
 for split in ${splits//,/ }; do
   python scripts/analyze_multi_samples.py --task ${dataset} --data "${data}" --samples "samples/${dataset}-${split}" \
     --out "results/${dataset}-${split}"

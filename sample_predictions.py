@@ -179,8 +179,8 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data", required=True, help="Dataset directory; its test split is sampled (see --split)")
     parser.add_argument("--split", default="test",
-                        help="Split(s) to sample, comma-separated: test, train (e.g. to look for solutions held out of "
-                             "training), or both (test,train); the model is loaded once for all of them")
+                        help="Split(s) to sample, comma-separated: test, val, train (e.g. to look for solutions held "
+                             "out of training), or several (test,train); the model is loaded once for all of them")
     parser.add_argument("--out", required=True,
                         help="Output directory; with several splits it must contain {split}")
     parser.add_argument("--num_samples", type=int, default=1)
@@ -189,8 +189,8 @@ def main():
                         help=f"Queries x samples per forward pass (default: {TOKENS_PER_PASS:,} tokens / sequence length)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_queries", type=int, default=None, help="Sample only the first queries (for quick checks)")
-    parser.add_argument("--max_train_queries", type=int, default=None,
-                        help="As --max_queries, for the train split only (e.g. 2000 of 100k training inputs)")
+    parser.add_argument("--max_nontest_queries", type=int, default=None,
+                        help="As --max_queries, for every split but test (e.g. 2000 of 100k training inputs)")
     args = parser.parse_args()
     splits = [s for s in args.split.split(",") if s]
     if len(splits) > 1 and "{split}" not in args.out:
@@ -216,7 +216,7 @@ def main():
         return loaded["model"]
 
     for split in splits:
-        max_queries = args.max_train_queries if split == "train" and args.max_train_queries else args.max_queries
+        max_queries = args.max_nontest_queries if split != "test" and args.max_nontest_queries else args.max_queries
         sample_split(args, split, args.out.replace("{split}", split), max_queries, rank, world_size, device, get_model)
 
 

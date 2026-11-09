@@ -25,7 +25,11 @@ pip install -r requirements.txt
 bash scripts/build_multi_datasets.sh                                   # all four datasets, CPU only
 STEPS=150000 bash scripts/multi_compare.sh sudoku gram_std_bestofk     # train (or: KL_COEF=0.1 ... sudoku gram)
 bash scripts/multi_evaluate.sh sudoku gram_std_bestofk_steps150000_seed42   # sample and score, test and train
+bash scripts/score_checkpoints.sh sudoku gram_std_bestofk_steps150000_seed42   # score checkpoints on the validation split
+python scripts/checkpoint_trends.py gram_std_bestofk_steps150000_seed42         # validity and diversity per checkpoint
 ```
+
+The validation split is for choosing beta and reading training curves; the test split is only for reporting. N-Queens has no unused inputs, so its validation split is the first 1000 test inputs, and its final numbers come from `test_no_val` (see `dataset/build_validation_split.py`).
 
 `scripts/analyze_multi_samples.py --check_data` checks a dataset on its own. See each script's header for options.
 

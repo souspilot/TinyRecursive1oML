@@ -8,6 +8,8 @@
 #   sudoku    9x9 Sudoku, 26 to 50 clues, up to 1024 sols    (dataset/build_sudoku_multi_dataset.py)
 #   graph     3-colouring of 10-node graphs, 1 to 9842 sols  (dataset/build_graph_coloring_multi_dataset.py)
 #
+# Each also gets a validation split (dataset/build_validation_split.py), for choosing beta and reading training curves.
+#
 # Usage: bash scripts/build_multi_datasets.sh [dataset ...]     (default: all four; CPU only, uses every core)
 set -e
 cd "$(dirname "$0")/.."
@@ -31,4 +33,5 @@ for d in ${datasets}; do
     *) echo "Unknown dataset: $d (maze, nqueens, sudoku, graph)"; exit 1 ;;
   esac
 done
+python dataset/build_validation_split.py ${datasets}
 echo "Done: ${datasets}"

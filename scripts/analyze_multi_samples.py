@@ -284,10 +284,12 @@ def write_summary(results, out_dir):
 def check_data(task_name, data_path, max_queries):
     """Check a -1oml dataset with the same checkers the samples are scored with: every stored solution valid,
     distinct and no more than the input's solution count, stored = min(solutions, slots), and no input shared
-    between train and test. Prints a report and returns True when everything passes."""
+    between splits that must be apart. Prints a report and returns True when everything passes."""
     ok_all = True
     seen = {}
-    for split in ("train", "test"):
+    for split in ("train", "test", "val", "test_no_val"):
+        if not os.path.isdir(os.path.join(data_path, split)):
+            continue
         metadata, inputs, label_set, num_solutions = load_split(data_path, split)
         q = min(len(inputs), max_queries)
         task = Task(task_name, metadata["seq_len"], metadata["vocab_size"])
@@ -314,9 +316,12 @@ def check_data(task_name, data_path, max_queries):
             status = "ok" if rate == 1 else "FAIL"
             ok_all &= rate == 1
             print(f"  [{status}] {name}: {100 * rate:.3f}%", flush=True)
-    shared = len(seen["train"] & seen["test"])
-    ok_all &= shared == 0
-    print(f"  [{'ok' if shared == 0 else 'FAIL'}] test inputs also in train: {shared}", flush=True)
+    # N-Queens' val is cut from its test split, so there the split reported on is test_no_val
+    reported = "test_no_val" if "test_no_val" in seen else "test"
+    for a, b in [("train", "test")] + ([("train", "val"), (reported, "val")] if "val" in seen else []):
+        shared = len(seen[a] & seen[b])
+        ok_all &= shared == 0
+        print(f"  [{'ok' if shared == 0 else 'FAIL'}] {b} inputs also in {a}: {shared}", flush=True)
     return ok_all
 
 
@@ -328,7 +333,7 @@ def main():
     parser.add_argument("--out")
     parser.add_argument("--check_data", action="store_true",
                         help="Only check the dataset itself (stored solutions valid and distinct, counts consistent, "
-                             "no train/test overlap); no samples needed")
+                             "no overlap between splits); no samples needed")
     parser.add_argument("--force", action="store_true",
                         help="Recompute every run, even those whose saved results are up to date")
     parser.add_argument("--max_queries", type=int, default=10**9,
