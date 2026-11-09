@@ -3,7 +3,7 @@
 # fresh random latent (sample_predictions.py), then score them all with scripts/analyze_multi_samples.py (validity,
 # diversity against a uniform sampler, error anatomy and, on the train split, held-out solutions).
 #
-# Usage: bash scripts/multi_evaluate.sh <maze|nqueens|sudoku|graph|sat> <run> [splits]
+# Usage: bash scripts/multi_evaluate.sh <maze|nqueens|sudoku|graph> <run> [splits]
 #   e.g. bash scripts/multi_evaluate.sh sudoku gram_std_bestofk_seed42            (test and train, one model load)
 #        bash scripts/multi_evaluate.sh graph gram_std_bestofk_seed42 test        (test only)
 #
@@ -23,8 +23,7 @@ case $dataset in
   nqueens) data=data/nqueens-10-s16-1oml project=Nqueens-multi ;;
   sudoku)  data=data/sudoku-multi-1oml project=Sudoku-multi ;;
   graph)   data=data/graph-coloring-multi-1oml project=Graph-coloring-multi ;;
-  sat)     data=data/sat-16-wide-1oml project=Sat-16-wide ;;
-  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph, sat)"; exit 1 ;;
+  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph)"; exit 1 ;;
 esac
 step_dir=final
 name=${run}

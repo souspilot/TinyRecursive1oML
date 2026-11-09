@@ -1,6 +1,5 @@
 from typing import Any, Tuple, Dict, Sequence, Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -43,36 +42,9 @@ def token_log_probs(logits, loss_type: str):
     return F.log_softmax(logits.to(torch.float32), dim=-1)
 
 
-ONE_OF_MANY_METHODS = ("naive", "minloss", "iexplr", "selectr", "setmatch", "bestofk")
-
-
-class TargetSelector(nn.Module):
-    """G_phi of 1oML SelectR (https://arxiv.org/abs/2008.11990): scores each candidate target
-    given the input and the current prediction. A small transformer over cells stands in for the
-    paper's NLM; it sees the soft prediction rather than the argmax of a lagged model copy."""
-
-    def __init__(self, vocab_size: int, seq_len: int, hidden_size: int, num_layers: int, num_heads: int):
-        super().__init__()
-        self.embed_inputs = nn.Embedding(vocab_size, hidden_size)
-        self.embed_targets = nn.Embedding(vocab_size, hidden_size)
-        self.proj_preds = nn.Linear(vocab_size, hidden_size)
-        self.embed_pos = nn.Parameter(torch.randn(seq_len, hidden_size) * 0.02)
-        layer = nn.TransformerEncoderLayer(hidden_size, num_heads, 2 * hidden_size, dropout=0.0, batch_first=True, norm_first=True)
-        self.encoder = nn.TransformerEncoder(layer, num_layers, enable_nested_tensor=False)
-        self.score_head = nn.Linear(hidden_size, 1)
-
-        # Training steps taken, to time the switch from MinLoss targets to selected targets
-        self.steps = nn.Buffer(torch.zeros((), dtype=torch.long))
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor, pred_probs: torch.Tensor) -> torch.Tensor:
-        h = self.embed_inputs(inputs) + self.embed_targets(targets) + self.proj_preds(pred_probs) + self.embed_pos
-        return self.score_head(self.encoder(h).mean(1)).squeeze(-1)
-
-
 class ACTLossHead(nn.Module):
     def __init__(self, model: nn.Module, loss_type: str, kl_coef: float = 0.0, kl_balance_alpha: Optional[float] = None, free_bits: Optional[float] = None, value_coef: float = 1.0, data_path: Optional[str] = None,
-                 kl_budget: Optional[float] = None, one_of_many: str = "naive", selectr_pretrain_steps: int = 250, selectr_hidden_size: int = 128, selectr_layers: int = 2, selectr_heads: int = 4,
-                 rollouts: int = 1):
+                 one_of_many: str = "naive", rollouts: int = 1):
         super().__init__()
         self.model = model
         self.loss_type = loss_type
@@ -80,9 +52,6 @@ class ACTLossHead(nn.Module):
         self.kl_coef = kl_coef
         self.kl_balance_alpha = kl_balance_alpha  # If not None, use KL balancing (e.g., 0.8)
         self.free_bits = free_bits  # If not None, apply free bits to KL (e.g., 0.1)
-        # If not None, each example's KL is free up to kl_budget * ln(number of solutions) nats, the information
-        # needed to pick one of its solutions, and penalized above it (needs num_solutions in the dataset)
-        self.kl_budget = kl_budget
         self.value_coef = value_coef  # Coefficient for value loss
 
         # Detect task type from data_path for task-specific verification
@@ -97,20 +66,12 @@ class ACTLossHead(nn.Module):
             self.is_sudoku = 'sudoku' in data_path_lower
             self.is_maze = 'maze' in data_path_lower
 
-        # One-of-many learning (1oML): how to pick the training target among an input's solutions.
-        # naive uses `labels` as given; the others need `label_set` from a --one-of-many dataset.
-        assert one_of_many in ONE_OF_MANY_METHODS, f"one_of_many must be one of {ONE_OF_MANY_METHODS}, got {one_of_many}"
+        # naive trains on `labels`. bestofk (needs `label_set` from a -1oml dataset, and rollouts > 1 side by side in
+        # the batch) trains only the rollout closest to any stored solution (best-of-many, Bhattacharyya et al. 2018)
+        assert one_of_many in ("naive", "bestofk"), f"one_of_many must be naive or bestofk, got {one_of_many}"
         self.one_of_many = one_of_many
-        self.selectr_pretrain_steps = selectr_pretrain_steps
-        # Training rollouts per example, side by side in the batch (pretrain's `rollouts`). setmatch spreads an
-        # example's rollouts over its stored solutions, one to one, as evenly as possible. bestofk trains only the
-        # rollout closest to any stored solution (best-of-many, Bhattacharyya et al. 2018), i.e. MinLoss over both
-        # rollouts and solutions; with prior latents (gram train_latent=prior) the label never reaches the latent
         self.rollouts = rollouts
         assert one_of_many != "bestofk" or rollouts > 1, "bestofk needs rollouts > 1"
-        if one_of_many == "selectr":
-            self.selector = TargetSelector(model.config.vocab_size, model.config.seq_len,
-                                           selectr_hidden_size, selectr_layers, selectr_heads)
 
     def initial_carry(self, *args, **kwargs):
         return self.model.initial_carry(*args, **kwargs)  # type: ignore
@@ -126,61 +87,6 @@ class ACTLossHead(nn.Module):
         counts = mask.sum(-1)
         losses = -torch.where(mask, target_logprobs, 0).sum(-1) / counts.clamp_min(1)
         return losses, counts, counts > 0
-
-    @torch.compiler.disable
-    def setmatch_weights(self, target_losses: torch.Tensor, target_valid: torch.Tensor) -> torch.Tensor:
-        """Assign each example's rollouts to its stored solutions with minimum total loss (Hungarian matching).
-
-        Solutions are repeated as often as needed to cover all rollouts, so with fewer solutions than rollouts
-        every solution gets a rollout, and with one solution all rollouts go to it. Returns (B, K) one-hot weights."""
-        from scipy.optimize import linear_sum_assignment
-
-        k = self.rollouts
-        costs = target_losses.detach().to(torch.float32).cpu().numpy()
-        valid = target_valid.cpu().numpy()
-        weights = np.zeros(costs.shape, dtype=np.float32)
-        for start in range(0, costs.shape[0], k):
-            solutions = np.where(valid[start])[0]  # the rollouts of an example share its stored solutions
-            if len(solutions) == 0:
-                continue
-            columns = np.tile(solutions, -(-k // len(solutions)))
-            rows, picked = linear_sum_assignment(costs[start:start + k][:, columns])
-            weights[start + rows, columns[picked]] = 1
-        return torch.from_numpy(weights).to(device=target_losses.device, dtype=target_losses.dtype)
-
-    @torch.compiler.disable
-    def selectr_weights(self, inputs, logits, preds, label_set, target_valid, minloss_weights):
-        """SelectR: G_phi picks the target distribution, trained to maximise the expected reward
-        (fraction of cells where the current prediction agrees with the target).
-
-        Returns target weights for the prediction loss, the selector loss, and its metrics."""
-        has_target = target_valid.any(-1)
-        b_idx, k_idx = target_valid.nonzero(as_tuple=True)
-
-        scores = self.selector(inputs[b_idx].to(torch.long),
-                               label_set[b_idx, k_idx].clamp_min(0).to(torch.long),
-                               torch.softmax(logits[b_idx].detach().to(torch.float32), dim=-1))
-        all_scores = torch.full(target_valid.shape, -torch.inf, dtype=scores.dtype, device=scores.device)
-        all_scores = all_scores.index_put((b_idx, k_idx), scores)
-        probs = torch.softmax(torch.where(has_target.unsqueeze(-1), all_scores, 0), dim=-1) * target_valid
-
-        target_mask = label_set != IGNORE_LABEL_ID
-        reward = ((preds.unsqueeze(1) == label_set) & target_mask).sum(-1) / target_mask.sum(-1).clamp_min(1)
-        # Expected (1 - reward): same gradient as maximising reward, since probs sum to 1 per input
-        selector_loss = (probs * (1 - reward)).sum()
-
-        # Train the prediction network on MinLoss targets until G_phi has warmed up, then on the
-        # expected loss under G_phi's distribution (as in the paper's experiments)
-        if self.training:
-            self.selector.steps += 1
-        warm = self.selector.steps > self.selectr_pretrain_steps
-        weights = torch.where(warm, probs.detach(), minloss_weights)
-
-        metrics = {
-            "selectr_reward": (probs * reward).sum(-1).detach(),
-            "selectr_explore": (probs.argmax(-1) != minloss_weights.argmax(-1)) & has_target,
-        }
-        return weights, selector_loss, metrics
 
     def forward(
         self,
@@ -198,52 +104,33 @@ class ACTLossHead(nn.Module):
         if self.training and self.rollouts > 1:
             new_carry.halted = new_carry.halted.view(-1, self.rollouts).all(-1).repeat_interleave(self.rollouts)
 
-        # One-of-many: pick the target(s) to train on among the input's solutions
+        # Best-of-K: each rollout's closest stored solution, then only the best rollout of each example trains
         target_weights = None
-        selector_loss = 0
-        selector_metrics = {}
-        if self.one_of_many != "naive":
-            assert "post_mu" not in outputs, "one_of_many requires a model that does not condition on labels (e.g. TRM, not GRAM)"
-            assert "label_set" in new_carry.current_data, "one_of_many needs a dataset built with --one-of-many (label_set)"
+        if self.one_of_many == "bestofk":
+            assert "post_mu" not in outputs, "bestofk requires latents that do not see the label (train_latent=prior)"
+            assert "label_set" in new_carry.current_data, "bestofk needs a -1oml dataset (label_set)"
             label_set = new_carry.current_data["label_set"]
-            target_losses, target_counts, target_valid = self.target_set_losses(outputs["logits"], label_set)
+            target_losses, _, target_valid = self.target_set_losses(outputs["logits"], label_set)
 
             with torch.no_grad():
                 minloss_weights = F.one_hot(torch.where(target_valid, target_losses, torch.inf).argmin(-1), label_set.shape[1]).to(target_losses.dtype)
-                if not self.training or self.one_of_many == "minloss":
-                    target_weights = minloss_weights
-                elif self.one_of_many == "setmatch":
-                    target_weights = self.setmatch_weights(target_losses, target_valid)
-                elif self.one_of_many == "bestofk":
-                    # Each rollout's closest solution, then only the best rollout of each example trains. Its weight
-                    # is K, so each example's reconstruction loss has the same scale as with one rollout, against
-                    # the halting loss that every rollout still gets
+                target_weights = minloss_weights
+                if self.training:
+                    # The chosen rollout's weight is K, so each example's reconstruction loss has the same scale as
+                    # with one rollout, against the halting loss that every rollout still gets
                     k = self.rollouts
                     best = torch.where(target_valid, target_losses, torch.inf).min(-1).values.view(-1, k)
                     chosen = F.one_hot(best.argmin(-1), k).view(-1).to(target_losses.dtype)
                     target_weights = minloss_weights * (k * chosen).unsqueeze(-1)
-                elif self.one_of_many == "iexplr":
-                    # Sample a target with the probability the model assigns to it (Gumbel-max)
-                    log_likelihood = torch.where(target_valid, -target_losses * target_counts, -torch.inf)
-                    log_likelihood = torch.where(target_valid.any(-1, keepdim=True), log_likelihood, 0)
-                    gumbel = -torch.log(-torch.log(torch.rand_like(log_likelihood).clamp(1e-20, 1)))
-                    target_weights = F.one_hot((log_likelihood + gumbel).argmax(-1), label_set.shape[1]).to(target_losses.dtype)
 
-            if target_weights is None:
-                target_weights, selector_loss, selector_metrics = self.selectr_weights(
-                    new_carry.current_data["inputs"], outputs["logits"], torch.argmax(outputs["logits"], dim=-1).detach(),
-                    label_set, target_valid, minloss_weights)
-
-            # Token-level metrics use the most-weighted target (bestofk: each rollout's own closest target, since the
-            # rollouts that don't train have no weight)
-            metric_weights = minloss_weights if self.one_of_many == "bestofk" else target_weights
-            labels = torch.gather(label_set, 1, metric_weights.argmax(-1).view(-1, 1, 1).expand(-1, 1, label_set.shape[-1])).squeeze(1)
+            # Token-level metrics use each rollout's own closest target
+            labels = torch.gather(label_set, 1, minloss_weights.argmax(-1).view(-1, 1, 1).expand(-1, 1, label_set.shape[-1])).squeeze(1)
 
         with torch.no_grad():
             # Preds - sample if temperature > 0 during inference, else greedy
             temperature = getattr(self.model.config, 'temperature', 0.0)
             if not self.model.training and temperature > 0.0:
-                probs = token_log_probs(outputs["logits"], self.loss_type).exp()
+                probs = torch.softmax(outputs["logits"], dim=-1)
                 outputs["preds"] = torch.multinomial(probs.view(-1, probs.shape[-1]), num_samples=1).view(probs.shape[:-1])
             else:
                 outputs["preds"] = torch.argmax(outputs["logits"], dim=-1)
@@ -301,9 +188,6 @@ class ACTLossHead(nn.Module):
                     metrics["count" + suffix] = (valid_metrics & subset).sum()
                     metrics["exact_accuracy" + suffix] = (valid_metrics & subset & seq_is_correct).sum()
 
-            for k, v in selector_metrics.items():
-                metrics[k] = torch.where(valid_metrics, v, 0).sum()
-
             # Share of an example's rollouts that give distinct answers (1/rollouts = the noise is ignored)
             if self.training and self.rollouts > 1:
                 grouped = preds.view(-1, self.rollouts, preds.shape[-1])
@@ -322,8 +206,6 @@ class ACTLossHead(nn.Module):
             "lm_loss": lm_loss.detach(),
             "q_halt_loss": q_halt_loss.detach(),
         })
-        if torch.is_tensor(selector_loss):
-            metrics["selectr_loss"] = selector_loss.detach()
         # Q continue (bootstrapping target loss); Alexia: This fits Q-learning, but seems totally unecessary
         q_continue_loss = 0
         if "target_q_continue" in outputs:
@@ -340,17 +222,16 @@ class ACTLossHead(nn.Module):
                 metrics["kl_loss"] = kl_loss.detach()
             else:
                 def compute_kl(post_mu, post_logvar, prior_mu, prior_logvar):
-                    # Per example: summed over positions and latent dimensions
                     return torch.sum(0.5 * (
                         prior_logvar - post_logvar - 1
                         + torch.exp(post_logvar - prior_logvar)
                         + ((post_mu - prior_mu) ** 2) / torch.exp(prior_logvar)
-                    ), dim=tuple(range(1, post_mu.ndim)))
+                    ))
 
                 if self.kl_balance_alpha is not None:
                     # KL balancing: alpha * KL(sg(post) || prior) + (1-alpha) * KL(post || sg(prior))
                     alpha = self.kl_balance_alpha
-                    kl_per_example = (
+                    kl_loss = (
                         alpha * compute_kl(outputs["post_mu"].detach(), outputs["post_logvar"].detach(),
                                           outputs["prior_mu"], outputs["prior_logvar"])
                         + (1 - alpha) * compute_kl(outputs["post_mu"], outputs["post_logvar"],
@@ -358,29 +239,12 @@ class ACTLossHead(nn.Module):
                     )
                 else:
                     # Standard KL
-                    kl_per_example = compute_kl(outputs["post_mu"], outputs["post_logvar"],
-                                                outputs["prior_mu"], outputs["prior_logvar"])
-                kl_loss = kl_per_example.sum()
-                metrics["kl_loss"] = kl_loss.detach()
-                if self.kl_budget is not None:
-                    assert "num_solutions" in new_carry.current_data, "kl_budget needs num_solutions in the dataset"
-                    # Only the posterior's side is free up to the budget; the prior's side always trains the prior
-                    # to follow the posterior, so prior samples stay usable at test time. Without KL balancing the
-                    # two sides have weight 1 each, which gives the standard KL gradient above the budget.
-                    # Padding rows have 0 solutions and get no budget
-                    alpha = self.kl_balance_alpha
-                    prior_weight, post_weight = (alpha, 1 - alpha) if alpha is not None else (1.0, 1.0)
-                    kl_prior_side = compute_kl(outputs["post_mu"].detach(), outputs["post_logvar"].detach(),
-                                               outputs["prior_mu"], outputs["prior_logvar"])
-                    kl_post_side = compute_kl(outputs["post_mu"], outputs["post_logvar"],
-                                              outputs["prior_mu"].detach(), outputs["prior_logvar"].detach())
-                    budget = self.kl_budget * torch.log(new_carry.current_data["num_solutions"].clamp_min(1).to(kl_post_side.dtype))
-                    over_budget = torch.relu(kl_post_side - budget)
-                    kl_loss = (prior_weight * kl_prior_side + post_weight * over_budget).sum()
-                    metrics["kl_over_budget_loss"] = over_budget.sum().detach()
+                    kl_loss = compute_kl(outputs["post_mu"], outputs["post_logvar"],
+                                        outputs["prior_mu"], outputs["prior_logvar"])
                 # Apply free bits if specified (per sample)
                 if self.free_bits is not None:
                     kl_loss = torch.clamp(kl_loss, min=self.free_bits)
+                metrics["kl_loss"] = kl_loss.detach()
 
         # Value loss (if value head is enabled)
         value_loss = 0
@@ -395,5 +259,5 @@ class ACTLossHead(nn.Module):
         # Filter outputs for return
         detached_outputs = {k: outputs[k].detach() for k in return_keys if k in outputs}
 
-        return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss) + self.kl_coef * kl_loss + self.value_coef * value_loss + selector_loss, metrics, detached_outputs, new_carry.halted.all()
+        return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss) + self.kl_coef * kl_loss + self.value_coef * value_loss, metrics, detached_outputs, new_carry.halted.all()
 

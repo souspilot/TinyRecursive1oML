@@ -1,18 +1,17 @@
-# ARC training config
+# Training config
 
 defaults:
-  - arch: trm
+  - arch: gram
   - _self_
 
 hydra:
   output_subdir: null
 
 # Data path
-data_paths: ['data/arc-aug-1000']
+data_paths: []
 data_paths_test: []
 
-evaluators:
-  - name: arc@ARC
+evaluators: []
 
 # Hyperparams - Training
 global_batch_size: 768

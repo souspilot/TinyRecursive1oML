@@ -5,7 +5,6 @@ loss:
   kl_coef: ${..kl_coef}
   kl_balance_alpha: ${..kl_balance_alpha}
   free_bits: ${..free_bits}
-  kl_budget: ${..kl_budget}
   value_coef: ${..value_coef}
   one_of_many: naive  # bestofk (with train_latent=prior and rollouts > 1): train only the prior sample closest to a stored solution
 
@@ -38,7 +37,6 @@ latent_dim: 256  # dimension of latent variable z
 kl_coef: 0.1 # coefficient for KL divergence loss
 kl_balance_alpha: null # KL balancing alpha (null=disabled, 0.8=enabled with DreamerV3 setting)
 free_bits: null # free bits for KL loss (null=disabled, e.g., 0.1=minimum KL per latent dimension)
-kl_budget: null # per-example KL budget: KL up to kl_budget * ln(num_solutions) nats is free (null=disabled, 1.0=enough to pick one solution)
 use_mlp_sampler: true # use MLP encoders for prior/posterior (False=linear projection, True=SwiGLU MLP)
 train_latent: posterior # training latents from the posterior (GRAM) or the prior (no label in the latent, no KL; pair with loss.one_of_many=bestofk)
 prior_noise: learned # prior p(z|x): learned (GRAM) or standard (N(0, I), no parameters; for train_latent=prior)

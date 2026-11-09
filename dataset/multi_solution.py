@@ -1,4 +1,4 @@
-"""Shared pieces for multi-solution dataset builders in the layout of build_maze_dataset.py and build_sat_dataset.py.
+"""Shared pieces for multi-solution dataset builders in the layout of build_maze_dataset.py.
 
 A builder supplies generate_chunk(args) -> list of examples, where args = (seed, task_args, num_candidates, needed)
 and each example is a dict with:
