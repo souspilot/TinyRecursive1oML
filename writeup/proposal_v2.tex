@@ -1,0 +1,80 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.7in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=1.2em}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\pagestyle{empty}
+
+\begin{document}
+
+\begin{center}
+{\large\bfseries Stress-testing and potentially improving Generative Recursive Reasoning Models on problems with multiple solutions}\\[2pt]
+Harshit Bisht (2025AIZ8455), Ashwendh Choudhary (2026AIY7513)
+\end{center}
+
+Many reasoning problems have more than one correct answer, and a useful reasoner should return a valid one every time, while also being capable of generating all of them by sampling multiple times. GRAM (Baek et al., 2026) gets this from tiny recursive models (TRM) by adding a latent variable to the recursion. During training the latent comes from a posterior that sees the answer; at test time it comes from a prior that does not. An additional loss term minimises the KL divergence between the prior and posterior, with $\beta$ as the coefficient. We want to answer three questions:
+\begin{itemize}
+  \item[\textbf{Q1}] How should $\beta$ be chosen for a new problem, without a test-set sweep, so that the latent neither \emph{collapses} (every sample the same) nor \emph{leaks} (training succeeds through the answer-carrying posterior while prior samples fail)?
+  \item[\textbf{Q2}] Can we find a problem instance where training through the posterior is harmful? Can a model that never feeds the gold answer to its latent match GRAM's performance?
+  \item[\textbf{Q3}] Can a model reliably produce valid solutions that it never saw in training?
+\end{itemize}
+
+In preliminary runs GRAM was the strongest method, giving the highest coverage on N-Queens and mazes. Its weak points
+are the ones we target: a good $\beta$ was narrow and task-specific (on mazes, $\beta=0.01$ leaked and $0.02$
+collapsed), and on random 3-SAT its posterior fitted the training answers while prior samples were almost never valid.
+
+\textbf{Datasets.} Every solution of every input can be enumerated exactly, and ambiguity can be dialled from one
+solution to many.
+\vspace{-3pt}
+\begin{center}\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+Dataset & Ambiguity knob & Solutions per input & Main use \\
+\midrule
+D1 N-Queens, 10$\times$10 & queens given & 1 to dozens & Q2, Q3 \\
+D2 Mazes, 15$\times$15 & open cells & 1 to $\sim$1000 & Q1, Q3 \\
+D3 Sudoku, 9$\times$9 & clues & 1 to $\sim$100 & Q1, Q2 \\
+D4 Graph colouring & colours, density & 6 to thousands & Q1, Q3 \\
+D5 3-SAT, 16 variables & clause ratio & 1 to thousands & Q1, Q2 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{-3pt}
+
+\textbf{Metrics.} Single-sample validity; coverage, the share of all solutions found in $K$ samples; evenness, the
+divergence of samples from uniform over valid solutions; and for Q3, the share of valid samples not seen in training.
+
+\textbf{Q1: choosing $\beta$.} We train GRAM at 5 values of $\beta$ per dataset, for 200k steps or until validation
+loss rises, to find the best $\beta$. On held-out training inputs we record \emph{leakage} (posterior minus prior
+validity) and \emph{collapse} (distinct valid prior samples relative to the number of solutions). We then test three
+rules against the best $\beta$, fitting each on four datasets and scoring it on the fifth: (R1) adapt one global
+$\beta$ so the KL meets a target of mean $\ln k$ for $k$ solutions, as in GECO (Rezende and Viola, 2018); (R2) pick
+$\beta$ by the two diagnostics; (R3) remove $\beta$ with Q2's prior-only training.
+
+\textbf{Q2: training without the posterior.} We compare GRAM with two objectives that never feed the answer to the
+latent, at equal training compute: (a) \emph{prior best-of-$K$}, which samples $K$ latents from the prior and trains on
+the rollout closest to any valid solution (MinLoss over latents; Bhattacharyya et al., 2018), and (b) a mix of
+posterior and prior training (Sohn et al., 2015). We expect these to remove leakage but risk collapsing onto a few
+solutions. To find where the posterior hurts, we vary difficulty within D3 and D5 and track the posterior--prior gap;
+we expect it to grow when the answer is hard to compute but cheap to encode. We also retrain GRAM's halting head,
+which only ever sees posterior rollouts, on prior rollouts.
+
+\textbf{Q3: unseen solutions.} We rebuild D1, D2 and D4 so that each training input keeps only part of its solution
+set $S$, then sample on those same inputs. A method generalises if the share of its samples that are valid and held
+out approaches $|S_{\text{held}}|/|S|$, what a uniform sampler would get. On D4 we hold out colourings up to colour
+permutation, so a new solution can't be a relabelled stored one. We compare GRAM, the Q2 objectives, and TRM with
+commit-and-re-run decoding (fix one decision, feed it back, run again), which self-reducibility (Jerrum, Valiant and
+Vazirani, 1986) suggests can build solutions it has never seen.
+
+\textbf{Plan.} We start with Q2's prior-only training on the datasets already built (D1, D2, D5), since it also
+provides R3 for Q1 and a method for Q3. Q3 follows on rebuilt N-Queens and mazes, and Q1's sweep comes last, reusing
+earlier runs. Every claim needs two seeds and a comparison with a simple non-learned baseline.
+
+\end{document}
