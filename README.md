@@ -23,7 +23,7 @@ so inputs with more have solutions held out of training.
 ```bash
 pip install -r requirements.txt
 bash scripts/build_multi_datasets.sh                                   # all four datasets, CPU only
-STEPS=150000 bash scripts/multi_compare.sh sudoku gram_std_bestofk     # train (or: KL_COEF=0.1 ... sudoku gram)
+STEPS=150000 bash scripts/multi_compare.sh sudoku gram_std_bestofk     # train (or: ... sudoku gram, the authors' beta)
 bash scripts/multi_evaluate.sh sudoku gram_std_bestofk_steps150000_seed42   # sample and score, test and train
 bash scripts/score_checkpoints.sh sudoku gram_std_bestofk_steps150000_seed42   # score checkpoints on the validation split
 python scripts/checkpoint_trends.py gram_std_bestofk_steps150000_seed42         # validity and diversity per checkpoint

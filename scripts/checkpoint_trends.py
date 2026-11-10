@@ -1,11 +1,12 @@
-"""Print how validity and diversity change over a run's checkpoints, and apply the rules for reading them.
+"""Print how validity and diversity change over a run's checkpoints, with the summary used to compare methods.
 
 Usage: python scripts/checkpoint_trends.py <run> [maze nqueens sudoku graph]    (after scripts/score_checkpoints.sh)
 
 ratio and distinct are on multi-solution inputs, among 100 samples; unique is the validity on unique-solution inputs.
-Rules, compared between the last checkpoint and the one nearest two thirds of the way through:
-  train longer  ratio gained more than RATIO_GAIN, or validity gained more than VALIDITY_GAIN points
-  unstable      the last checkpoint is below the run's best by more than PEAK_RATIO or PEAK_VALIDITY points
+Single checkpoints are noisy (ratio moves by ~0.04 between neighbouring ones), so:
+  summary       the mean of the last LAST checkpoints, used to compare methods and to choose beta
+  trend         a straight line fitted to ratio over the second half of training (gain per 100k steps, +- 1 SE)
+  train longer  the trend gains at least MIN_GAIN per 100k steps and is more than 2 SE above zero
 """
 import glob
 import json
@@ -13,10 +14,10 @@ import os
 import re
 import sys
 
-RATIO_GAIN = 0.03  # provisional, until a second seed gives the real noise level
-VALIDITY_GAIN = 2.0
-PEAK_RATIO = 0.05
-PEAK_VALIDITY = 2.0
+import numpy as np
+
+LAST = 4
+MIN_GAIN = 0.06  # per 100k steps, i.e. 0.03 over the last third of a 150k-step run
 
 
 def load_checkpoints(results_dir, run):
@@ -32,10 +33,21 @@ def load_checkpoints(results_dir, run):
 
 def row(result):
     groups = result["groups"]
-    samples = str(result["num_samples"])
-    diversity = groups["all"]["diversity"][samples]
+    diversity = groups["all"]["diversity"][str(result["num_samples"])]
     return dict(validity=100 * groups["all"]["validity"], ratio=diversity["ratio_to_uniform"],
                 distinct=diversity["distinct_valid"], unique=100 * groups["1"]["validity"])
+
+
+def trend(steps, ratios):
+    """Fitted gain per 100k steps and its standard error, over the second half of training."""
+    steps, ratios = np.array(steps), np.array(ratios)
+    half = steps >= steps[-1] / 2
+    if half.sum() < 4:
+        return None, None
+    x, y = steps[half] / 1e5, ratios[half]
+    slope, intercept = np.polyfit(x, y, 1)
+    residual_sd = (y - (slope * x + intercept)).std(ddof=2)
+    return slope, residual_sd / np.sqrt(((x - x.mean()) ** 2).sum())
 
 
 def report(task, run):
@@ -50,22 +62,16 @@ def report(task, run):
     print(f"{'step':>8} {'validity':>9} {'ratio':>6} {'distinct':>9} {'unique':>7}")
     for step, r in zip(steps, rows):
         print(f"{step:>8} {r['validity']:>9.1f} {r['ratio']:>6.3f} {r['distinct']:>9.1f} {r['unique']:>7.1f}")
-
-    last = rows[-1]
-    index = min(range(len(steps)), key=lambda i: abs(steps[i] - steps[-1] * 2 / 3))
-    if index == len(steps) - 1:
-        print("Too few checkpoints to apply the rules.\n")
+    last = {k: np.mean([r[k] for r in rows[-LAST:]]) for k in rows[0]}
+    print(f"{f'last {min(LAST, len(rows))}':>8} {last['validity']:>9.1f} {last['ratio']:>6.3f} {last['distinct']:>9.1f} "
+          f"{last['unique']:>7.1f}   <- summary")
+    slope, se = trend(steps, [r["ratio"] for r in rows])
+    if slope is None:
+        print("Too few checkpoints in the second half for a trend.\n")
         return
-    ratio_gain = last["ratio"] - rows[index]["ratio"]
-    validity_gain = last["validity"] - rows[index]["validity"]
-    longer = ratio_gain > RATIO_GAIN or validity_gain > VALIDITY_GAIN
-    ratio_drop = max(r["ratio"] for r in rows) - last["ratio"]
-    validity_drop = max(r["validity"] for r in rows) - last["validity"]
-    unstable = ratio_drop > PEAK_RATIO or validity_drop > PEAK_VALIDITY
-    print(f"From step {steps[index]} to {steps[-1]}: ratio {ratio_gain:+.3f}, validity {validity_gain:+.1f} points; "
-          f"train longer: {'yes' if longer else 'no'}")
-    print(f"Below the run's best by: ratio {ratio_drop:.3f}, validity {validity_drop:.1f} points; "
-          f"unstable: {'yes' if unstable else 'no'}\n")
+    longer = slope >= MIN_GAIN and slope > 2 * se
+    print(f"Ratio trend over the second half: {slope:+.3f} +- {se:.3f} per 100k steps; "
+          f"train longer: {'yes' if longer else 'no'}\n")
 
 
 def main():

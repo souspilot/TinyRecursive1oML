@@ -2,10 +2,14 @@
 # Train one method on one dataset (built by scripts/build_multi_datasets.sh). All methods share the backbone below,
 # train for about STEPS steps, and are evaluated on the same test split.
 #
-# Usage: KL_COEF=0.1 bash scripts/multi_compare.sh <maze|nqueens|sudoku|graph> gram
+# Usage: bash scripts/multi_compare.sh <maze|nqueens|sudoku|graph> gram
 #        bash scripts/multi_compare.sh <maze|nqueens|sudoku|graph> gram_std_bestofk
 #
-#   gram              GRAM: posterior latents, one random stored solution per input each epoch. KL_COEF (beta) is required
+#   gram              GRAM: posterior latents, one random stored solution per input each epoch. KL_COEF sets beta;
+#                     by default the GRAM authors' (scripts/*_10.sh and sudoku_generation.sh in ahn-ml/gram-release):
+#                     N-Queens 0.045, graph 0.45, Sudoku 0.05. They have no maze setup. In all of theirs beta x the
+#                     number of labelled cells is 4.0-4.5 (cross-entropy is averaged over cells, the KL summed), so
+#                     maze, with 225 labelled cells, gets 4.5 / 225 = 0.02
 #   gram_std_bestofk  Same backbone with N(0, I) latents, so the label never reaches the latent (no posterior, no KL,
 #                     no beta): ROLLOUTS samples per input (default 8), and only the one closest to a stored solution
 #                     trains. Same 768 sequences per step, so 768 / ROLLOUTS inputs per step
@@ -18,17 +22,17 @@ method=$2
 steps=${STEPS:-150000}
 seed=${SEED:-42}
 case $dataset in
-  maze)    root=data/maze-multi project=Maze-multi ;;
-  nqueens) root=data/nqueens-multi project=Nqueens-multi ;;
-  sudoku)  root=data/sudoku-multi project=Sudoku-multi ;;
-  graph)   root=data/graph-coloring-multi project=Graph-coloring-multi ;;
+  maze)    root=data/maze-multi project=Maze-multi beta=0.02 ;;
+  nqueens) root=data/nqueens-multi project=Nqueens-multi beta=0.045 ;;
+  sudoku)  root=data/sudoku-multi project=Sudoku-multi beta=0.05 ;;
+  graph)   root=data/graph-coloring-multi project=Graph-coloring-multi beta=0.45 ;;
   *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph)"; exit 1 ;;
 esac
 
 backbone="arch=gram arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=4"
 case $method in
   gram)
-    [ -n "${KL_COEF}" ] || { echo "gram needs KL_COEF"; exit 1; }
+    KL_COEF=${KL_COEF:-${beta}}
     data=${root}
     rollouts=1
     arch_args="${backbone} arch.kl_balance_alpha=0.8 arch.kl_coef=${KL_COEF}"
