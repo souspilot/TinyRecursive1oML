@@ -51,22 +51,12 @@ if [ ! -f "${data}/train/dataset.json" ] || [ ! -f "${root}-1oml/test/dataset.js
   exit 1
 fi
 
-# The epoch count closest to the step budget, evaluated (and checkpointed) about every 1/20 of it. pretrain.py needs
-# the interval to divide the epochs: take the largest divisor up to 1/20, but if that is under half of it (more than
-# ~40 checkpoints, e.g. when the epoch count has no divisor near 1/20), use 1/20 itself and round the epochs to a
-# multiple of it instead, which moves the step count by at most ~2.5%. Runs started before this rule all had a divisor
-# above half, so they get the same epochs and interval as before and still resume correctly.
+# 20 evaluations (and checkpoints) per run: the epoch count closest to the step budget, rounded to a multiple of 20
 inputs_per_step=$(( 768 / rollouts ))
 groups=$(python -c "import json, sys; print(json.load(open(sys.argv[1]))['total_groups'])" "${data}/train/dataset.json")
-epochs=$(( (steps * inputs_per_step + groups / 2) / groups ))
-target=$(( epochs / 20 ))
-[ ${target} -lt 1 ] && target=1
-eval_interval=${target}
-while [ $(( epochs % eval_interval )) -ne 0 ]; do eval_interval=$(( eval_interval - 1 )); done
-if [ $(( 2 * eval_interval )) -lt ${target} ]; then
-  eval_interval=${target}
-  epochs=$(( (epochs + target / 2) / target * target ))
-fi
+eval_interval=$(( (steps * inputs_per_step + groups * 10) / (groups * 20) ))
+[ ${eval_interval} -lt 1 ] && eval_interval=1
+epochs=$(( eval_interval * 20 ))
 
 run_dir=checkpoints/${project}/${run}
 if [ -n "${RESUME}" ]; then
