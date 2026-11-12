@@ -34,14 +34,16 @@ def load_checkpoints(results_dir, run):
 def row(result):
     groups = result["groups"]
     diversity = groups["all"]["diversity"][str(result["num_samples"])]
-    return dict(validity=100 * groups["all"]["validity"], ratio=diversity["ratio_to_uniform"],
+    # ratio is None when no multi-solution input has a valid sample (early checkpoints): shown and skipped as nan
+    ratio = diversity["ratio_to_uniform"]
+    return dict(validity=100 * groups["all"]["validity"], ratio=np.nan if ratio is None else ratio,
                 distinct=diversity["distinct_valid"], unique=100 * groups["1"]["validity"])
 
 
 def trend(steps, ratios):
     """Fitted gain per 100k steps and its standard error, over the second half of training."""
     steps, ratios = np.array(steps), np.array(ratios)
-    half = steps >= steps[-1] / 2
+    half = (steps >= steps[-1] / 2) & ~np.isnan(ratios)
     if half.sum() < 4:
         return None, None
     x, y = steps[half] / 1e5, ratios[half]
@@ -62,7 +64,7 @@ def report(task, run):
     print(f"{'step':>8} {'validity':>9} {'ratio':>6} {'distinct':>9} {'unique':>7}")
     for step, r in zip(steps, rows):
         print(f"{step:>8} {r['validity']:>9.1f} {r['ratio']:>6.3f} {r['distinct']:>9.1f} {r['unique']:>7.1f}")
-    last = {k: np.mean([r[k] for r in rows[-LAST:]]) for k in rows[0]}
+    last = {k: np.nanmean([r[k] for r in rows[-LAST:]]) for k in rows[0]}
     print(f"{f'last {min(LAST, len(rows))}':>8} {last['validity']:>9.1f} {last['ratio']:>6.3f} {last['distinct']:>9.1f} "
           f"{last['unique']:>7.1f}   <- summary")
     slope, se = trend(steps, [r["ratio"] for r in rows])
