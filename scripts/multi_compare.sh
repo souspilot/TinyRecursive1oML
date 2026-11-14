@@ -51,12 +51,14 @@ if [ ! -f "${data}/train/dataset.json" ] || [ ! -f "${root}-1oml/test/dataset.js
   exit 1
 fi
 
-# 20 evaluations (and checkpoints) per run: the epoch count closest to the step budget, rounded to a multiple of 20
+# About 20 evaluations (and checkpoints) per run: the epoch count closest to the step budget, rounded to a multiple
+# of the evaluation interval (about 1/20 of it), which keeps the steps within ~2.5% of STEPS
 inputs_per_step=$(( 768 / rollouts ))
 groups=$(python -c "import json, sys; print(json.load(open(sys.argv[1]))['total_groups'])" "${data}/train/dataset.json")
-eval_interval=$(( (steps * inputs_per_step + groups * 10) / (groups * 20) ))
+epochs=$(( (steps * inputs_per_step + groups / 2) / groups ))
+eval_interval=$(( (epochs + 10) / 20 ))
 [ ${eval_interval} -lt 1 ] && eval_interval=1
-epochs=$(( eval_interval * 20 ))
+epochs=$(( (epochs + eval_interval / 2) / eval_interval * eval_interval ))
 
 run_dir=checkpoints/${project}/${run}
 if [ -n "${RESUME}" ]; then
