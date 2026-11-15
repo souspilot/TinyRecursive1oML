@@ -293,6 +293,12 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
             posterior_y_dim=posterior_y_dim,
             standard_prior=self.config.prior_noise == "standard",
         )
+        # Sampling-time options, set by sample_predictions.py and not part of the config (checkpoints are unaffected).
+        # eval_latent="posterior" draws z from q(z | x, y) with y = batch["labels"] instead of the prior, outside
+        # training too. state_noise adds N(0, state_noise^2) noise to the high-level state after each intermediate
+        # cycle, as test-time noise (PTRM) does
+        self.eval_latent = "prior"
+        self.state_noise = 0.0
 
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
         if self.config.puzzle_emb_ndim > 0:
@@ -405,6 +411,12 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         # Detach to prevent gradient flow through input encoder when processing posterior labels
         return y_emb.to(self.forward_dtype)
 
+    def _use_posterior(self):
+        """Whether z comes from the posterior: in training if train_latent says so, otherwise if eval_latent does."""
+        if self.training:
+            return self.config.train_latent == "posterior"
+        return self.eval_latent == "posterior"
+
     def empty_carry(self, batch_size: int):
         seq_len = self.num_patches if self.config.use_patchify else self.config.seq_len
         return GenerativeRecursiveReasoningModelInnerCarry(
@@ -439,7 +451,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                 puzzle_emb = z_H[:, :self.puzzle_emb_len]
                 h_t = z_H[:, self.puzzle_emb_len:]
 
-                if self.training and self.config.train_latent == "posterior":
+                if self._use_posterior():
                     if self.config.use_patchify:
                         y_tar = self._get_label_embedding(batch["labels"])
                     else:
@@ -453,6 +465,8 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                 z_proj_flat = self.variational.z_proj(z_flat)  # (B*N, hidden_size)
                 z = z_proj_flat.reshape(B, N, -1).to(self.forward_dtype)  # (B, N, D)
                 h_t_conditioned = h_t + z
+                if self.state_noise > 0:
+                    h_t_conditioned = h_t_conditioned + self.state_noise * torch.randn_like(h_t_conditioned)
                 z_H = torch.cat([puzzle_emb, h_t_conditioned], dim=1)
 
         # 1 with grad
@@ -470,7 +484,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         vae_outputs['prior_mu'] = prior_mu
         vae_outputs['prior_logvar'] = prior_logvar
 
-        if self.training and self.config.train_latent == "posterior":
+        if self._use_posterior():
             # Sample from posterior q(z|h_T, y_tar)
             if self.config.use_patchify:
                 y_tar = self._get_label_embedding(batch["labels"])

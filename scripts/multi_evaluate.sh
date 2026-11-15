@@ -11,7 +11,9 @@
 # QUERIES limits the inputs of every split but test (default 2000, the first ones, which are in random order). STEP picks a checkpoint other than
 # the final one (e.g. STEP=41660 for checkpoints/<project>/<run>/step_41660). GPUS for torchrun (default 1). BATCH
 # sets queries x samples per forward pass (default: scaled to the sequence length to fit an 80GB GPU; lower it to
-# share a GPU with a training run).
+# share a GPU with a training run). LATENT=posterior samples GRAM's latent from its posterior given a stored solution
+# (a diagnostic: what the decoder does when the latent matches training); NOISE adds test-time noise of that standard
+# deviation to the high-level state (PTRM). Both add a suffix to the name: <run>_posterior, <run>_noise<NOISE>.
 # Samples go to samples/<dataset>-<split>/<run>[_step<STEP>], results to results/<dataset>-<split>. Finished shards
 # and up-to-date analyses are reused, so rerunning after a failure only redoes what is missing.
 set -e
@@ -26,14 +28,16 @@ case $dataset in
   *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph)"; exit 1 ;;
 esac
 step_dir=final
-name=${run}
-if [ -n "${STEP}" ]; then step_dir=step_${STEP}; name=${run}_step${STEP}; fi
+# Sampling options go into the name, before any step, so their samples and results never mix with normal ones
+name=${run}${LATENT:+_${LATENT}}${NOISE:+_noise${NOISE}}
+if [ -n "${STEP}" ]; then step_dir=step_${STEP}; name=${name}_step${STEP}; fi
 checkpoint=checkpoints/${project}/${run}/${step_dir}/checkpoint.pt
 [ -f "${checkpoint}" ] || { echo "No checkpoint at ${checkpoint}"; ls "checkpoints/${project}/${run}" 2>/dev/null; exit 1; }
 
 torchrun --nproc-per-node ${GPUS:-1} --master-port $((29500 + RANDOM % 1000)) sample_predictions.py \
   --checkpoint "${checkpoint}" --data "${data}" --split "${splits}" --num_samples ${SAMPLES:-100} \
-  --out "samples/${dataset}-{split}/${name}" --max_nontest_queries ${QUERIES:-2000} ${BATCH:+--effective_batch_size ${BATCH}}
+  --out "samples/${dataset}-{split}/${name}" --max_nontest_queries ${QUERIES:-2000} ${BATCH:+--effective_batch_size ${BATCH}} \
+  ${LATENT:+--latent ${LATENT}} ${NOISE:+--state_noise ${NOISE}}
 for split in ${splits//,/ }; do
   python scripts/analyze_multi_samples.py --task ${dataset} --data "${data}" --samples "samples/${dataset}-${split}" \
     --out "results/${dataset}-${split}"

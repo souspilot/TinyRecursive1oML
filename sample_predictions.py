@@ -98,11 +98,19 @@ def load_model(checkpoint_path: str, metadata: PuzzleDatasetMetadata, device: st
 
 
 @torch.inference_mode()
-def sample(model, batch, num_samples: int, device: str):
-    """Run the model to completion on num_samples copies of each query.
+def sample(model, batch, num_samples: int, device: str, posterior: bool = False):
+    """Run the model to completion on num_samples copies of each query (with posterior, each copy's latent comes from
+    the posterior given one of the input's stored solutions).
 
     Returns preds (queries, samples, seq_len) and the final halting logits (queries, samples)."""
     expanded = {k: v.to(device).repeat_interleave(num_samples, dim=0) for k, v in batch.items()}
+    if posterior and "label_set" in expanded:
+        # The posterior sees one stored solution per sample, drawn uniformly from the input's stored solutions
+        # (empty slots hold only padding, 0, or ignored labels, as in analyze_multi_samples.py)
+        label_set = expanded["label_set"]
+        stored = ((label_set != IGNORE_LABEL_ID) & (label_set != 0)).any(-1)
+        pick = torch.multinomial(stored.float(), 1).squeeze(-1)
+        expanded["labels"] = label_set[torch.arange(len(pick), device=device), pick]
     with torch.device(device):
         carry = model.initial_carry(expanded)
     while True:
@@ -130,6 +138,10 @@ def sample_split(args, split, out, max_queries, rank, world_size, device, get_mo
     # Recorded only when set, so directories sampled from the test split before this option existed still resume
     if split != "test":
         meta["split"] = split
+    if args.latent != "prior":
+        meta["latent"] = args.latent
+    if args.state_noise:
+        meta["state_noise"] = args.state_noise
     os.makedirs(out, exist_ok=True)
     meta_path = os.path.join(out, "meta.json")
     if os.path.exists(meta_path):
@@ -163,7 +175,7 @@ def sample_split(args, split, out, max_queries, rank, world_size, device, get_mo
             batch_end = min(batch_start + queries_per_pass, end)
             torch.manual_seed(args.seed * 1_000_003 + batch_start)
             batch = make_batch(data, metadata, batch_start, batch_end)
-            batch_preds, batch_q = sample(model, batch, args.num_samples, device)
+            batch_preds, batch_q = sample(model, batch, args.num_samples, device, posterior=args.latent == "posterior")
             preds[batch_start - start:batch_end - start] = batch_preds.cpu().numpy()
             q[batch_start - start:batch_end - start] = batch_q.cpu().numpy()
 
@@ -191,6 +203,12 @@ def main():
     parser.add_argument("--max_queries", type=int, default=None, help="Sample only the first queries (for quick checks)")
     parser.add_argument("--max_nontest_queries", type=int, default=None,
                         help="As --max_queries, for every split but test (e.g. 2000 of 100k training inputs)")
+    parser.add_argument("--latent", choices=("prior", "posterior"), default="prior",
+                        help="Where the latent comes from: the prior (normal sampling) or, for GRAM, the posterior given "
+                             "a stored solution drawn per sample (what the decoder can do when the latent matches training)")
+    parser.add_argument("--state_noise", type=float, default=0.0,
+                        help="Standard deviation of Gaussian noise added to the high-level state after each "
+                             "intermediate cycle (test-time noise, as in PTRM); 0 for none")
     args = parser.parse_args()
     splits = [s for s in args.split.split(",") if s]
     if len(splits) > 1 and "{split}" not in args.out:
@@ -211,6 +229,11 @@ def main():
         # Splits of one dataset share vocabulary and sequence length, so one model serves them all
         if "model" not in loaded:
             model, step = load_model(args.checkpoint, metadata, device)
+            inner = model.model.inner
+            if args.latent == "posterior" and inner.config.train_latent != "posterior":
+                raise ValueError(f"{args.checkpoint} never trained its posterior (train_latent={inner.config.train_latent})")
+            inner.eval_latent = args.latent
+            inner.state_noise = args.state_noise
             print(f"[rank {rank}] Loaded {args.checkpoint} (step {step}) on {device}", flush=True)
             loaded["model"] = model
         return loaded["model"]
