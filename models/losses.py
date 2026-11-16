@@ -66,12 +66,12 @@ class ACTLossHead(nn.Module):
             self.is_sudoku = 'sudoku' in data_path_lower
             self.is_maze = 'maze' in data_path_lower
 
-        # naive trains on `labels`. bestofk (needs `label_set` from a -1oml dataset, and rollouts > 1 side by side in
-        # the batch) trains only the rollout closest to any stored solution (best-of-many, Bhattacharyya et al. 2018)
+        # naive trains on `labels`. bestofk (needs `label_set` from a -1oml dataset, with an example's rollouts side by
+        # side in the batch) trains only the rollout closest to any stored solution (best-of-many, Bhattacharyya et al.
+        # 2018). With one rollout this is the loss to the closest stored solution (MinLoss, Nandwani et al. 2021)
         assert one_of_many in ("naive", "bestofk"), f"one_of_many must be naive or bestofk, got {one_of_many}"
         self.one_of_many = one_of_many
         self.rollouts = rollouts
-        assert one_of_many != "bestofk" or rollouts > 1, "bestofk needs rollouts > 1"
 
     def initial_carry(self, *args, **kwargs):
         return self.model.initial_carry(*args, **kwargs)  # type: ignore
