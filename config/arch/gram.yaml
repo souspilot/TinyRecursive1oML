@@ -40,7 +40,11 @@ free_bits: null # free bits for KL loss (null=disabled, e.g., 0.1=minimum KL per
 use_mlp_sampler: true # use MLP encoders for prior/posterior (False=linear projection, True=SwiGLU MLP)
 train_latent: posterior # training latents from the posterior (GRAM) or the prior (no label in the latent, no KL; pair with loss.one_of_many=bestofk)
 prior_noise: learned # prior p(z|x): learned (GRAM) or standard (N(0, I), no parameters; for train_latent=prior)
-latent_scope: token # one latent per position and cycle (GRAM), or sample: one N(0, I) latent per sample, kept for the whole sample (needs train_latent=prior, prior_noise=standard)
+latent_scope: token # one latent per position and cycle (GRAM), none (no latent, recursion=strm only), or sample: one N(0, I) latent per sample, kept for the whole sample (needs train_latent=prior, prior_noise=standard)
+recursion: trm # trm (two states, as in GRAM) or strm (one multi-timescale state, Glass et al. 2026; posterior-free only)
+strm_min_rate: 0.07692307692307693 # STRM: rate of the slowest channel (1/13); heads read channels with rate <= sqrt of it
+strm_rate_jitter: 1.5 # STRM, training only: rates a^c per sample, c = J^u, u ~ U[-1, 1]
+strm_init: fixed # STRM start state: fixed (one random vector, as in STRM) or sample (new N(0, I) vector per sample)
 fix_mu: False # if True, force mu = 0 for both prior and posterior (ablation)
 fix_std: False # if True, force std = 0 for both prior and posterior, deterministic (ablation)
 

@@ -15,6 +15,10 @@
 #                     trains. Same 768 sequences per step, so 768 / ROLLOUTS inputs per step. LATENT_SCOPE=sample
 #                     draws one latent per sample, shared by all positions and kept for the whole sample, instead of a
 #                     new one per position and cycle (run name gets _sample)
+#   strm_bestofk      The same best-of-K training on STRM's recursion (Glass et al. 2026): one state whose channels are
+#                     moving averages at fixed rates, heads on the slow channels. Randomness comes from STRM_INIT=sample
+#                     (default: a new random start state per sample) and/or LATENT_SCOPE=sample (default none: an N(0, I)
+#                     latent per sample added to the input). STRM_MIN_RATE sets the slowest rate (default 1/13)
 #
 # STEPS (default 150000), SEED (default 42), RESUME=1 (continue an interrupted run from its latest checkpoint),
 # EXTRA_ARGS (appended to the pretrain.py arguments). Checkpoints go to checkpoints/<project>/<run>.
@@ -44,7 +48,14 @@ case $method in
     rollouts=${ROLLOUTS:-8}
     arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}"
     run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
-  *) echo "Unknown method: ${method} (gram, gram_std_bestofk)"; exit 1 ;;
+  strm_bestofk)
+    data=${root}-1oml
+    rollouts=${ROLLOUTS:-8}
+    scope=${LATENT_SCOPE:-none}
+    init=${STRM_INIT:-sample}
+    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts} arch.recursion=strm arch.latent_scope=${scope} arch.strm_init=${init}${STRM_MIN_RATE:+ arch.strm_min_rate=${STRM_MIN_RATE}}"
+    run=strm_bestofk_init${init}_latent${scope}${STRM_MIN_RATE:+_amin${STRM_MIN_RATE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
+  *) echo "Unknown method: ${method} (gram, gram_std_bestofk, strm_bestofk)"; exit 1 ;;
 esac
 [ -z "${EXTRA_ARGS}" ] || arch_args="${arch_args} ${EXTRA_ARGS}"
 
