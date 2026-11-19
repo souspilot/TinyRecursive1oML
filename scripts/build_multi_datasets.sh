@@ -7,6 +7,9 @@
 #   nqueens   10x10 N-Queens, 1 to 3 queens given           (dataset/build_nqueens_dataset.py, capped at 16)
 #   sudoku    9x9 Sudoku, 26 to 50 clues, up to 1024 sols    (dataset/build_sudoku_multi_dataset.py)
 #   graph     3-colouring of 10-node graphs, 1 to 9842 sols  (dataset/build_graph_coloring_multi_dataset.py)
+#   heyawake  10x10 heyawake from Pencil Puzzle Bench, 1 to 1023 sols, with its own validation split
+#             (dataset/build_heyawake_multi_dataset.py; not in the default list: needs clingo and
+#             HEYAWAKE_SOURCE=<path to the benchmark's full_dataset.jsonl>)
 #
 # Each also gets a validation split (dataset/build_validation_split.py), for choosing beta and reading training curves.
 #
@@ -30,8 +33,11 @@ for d in ${datasets}; do
       built data/sudoku-multi-1oml || python dataset/build_sudoku_multi_dataset.py --num-train 100000 --num-test 2000 --output-dir data/sudoku-multi ;;
     graph)
       built data/graph-coloring-multi-1oml || python dataset/build_graph_coloring_multi_dataset.py --num-train 100000 --num-test 2000 --output-dir data/graph-coloring-multi ;;
-    *) echo "Unknown dataset: $d (maze, nqueens, sudoku, graph)"; exit 1 ;;
+    heyawake)
+      built data/heyawake-multi-1oml || python dataset/build_heyawake_multi_dataset.py --source "${HEYAWAKE_SOURCE:?set HEYAWAKE_SOURCE}" --num-train 100000 --num-test 2000 --output-dir data/heyawake-multi ;;
+    *) echo "Unknown dataset: $d (maze, nqueens, sudoku, graph, heyawake)"; exit 1 ;;
   esac
 done
-python dataset/build_validation_split.py ${datasets}
+others=$(echo ${datasets} | tr ' ' '\n' | grep -v '^heyawake$' | tr '\n' ' ')
+[ -z "${others// }" ] || python dataset/build_validation_split.py ${others}
 echo "Done: ${datasets}"

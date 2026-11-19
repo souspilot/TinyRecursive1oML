@@ -32,7 +32,9 @@ case $dataset in
   nqueens) root=data/nqueens-multi project=Nqueens-multi beta=0.045 ;;
   sudoku)  root=data/sudoku-multi project=Sudoku-multi beta=0.05 ;;
   graph)   root=data/graph-coloring-multi project=Graph-coloring-multi beta=0.45 ;;
-  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph)"; exit 1 ;;
+  # Not tuned: beta x answer cells ~ 4.5, the rule that fits Sudoku, N-Queens and graph colouring
+  heyawake) root=data/heyawake-multi project=Heyawake-multi beta=0.045 ;;
+  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph, heyawake)"; exit 1 ;;
 esac
 
 backbone="arch=gram arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=4"
