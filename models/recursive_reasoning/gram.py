@@ -15,6 +15,7 @@ IGNORE_LABEL_ID = -100
 class GenerativeRecursiveReasoningModelInnerCarry:
     z_H: torch.Tensor
     z_L: torch.Tensor
+    eps: Optional[torch.Tensor] = None  # (B, latent_dim): the sample's latent when latent_scope="sample"
 
 
 @dataclass
@@ -70,6 +71,10 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
     # Prior p(z|x): "learned" (mean and log-variance from h, as in GRAM) or "standard" (N(0, I), no parameters, so
     # nothing can drift; z_proj still learns the noise covariance). With train_latent=prior this is IMLE-style noise.
     prior_noise: str = "learned"
+    # Scope of one latent draw: "token" (GRAM: a new z for every position at every cycle) or "sample" (one z ~ N(0, I)
+    # per sample, shared by all positions and kept for all its cycles and supervision steps, so a single draw can pick
+    # one solution for the whole answer). "sample" needs train_latent=prior and prior_noise=standard
+    latent_scope: str = "token"
 
     # Variational sampling control (for ablation)
     fix_mu: bool = False  # If True, force mu = 0 (both prior and posterior)
@@ -419,16 +424,30 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
 
     def empty_carry(self, batch_size: int):
         seq_len = self.num_patches if self.config.use_patchify else self.config.seq_len
+        sample_scope = self.config.latent_scope == "sample"
         return GenerativeRecursiveReasoningModelInnerCarry(
             z_H=torch.empty(batch_size, seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
             z_L=torch.empty(batch_size, seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
+            eps=torch.empty(batch_size, self.config.latent_dim, dtype=torch.float32) if sample_scope else None,
         )
-        
+
     def reset_carry(self, reset_flag: torch.Tensor, carry: GenerativeRecursiveReasoningModelInnerCarry):
+        # A sequence that starts a new sample also draws its sample latent
+        eps = None if carry.eps is None else torch.where(reset_flag.view(-1, 1), torch.randn_like(carry.eps), carry.eps)
         return GenerativeRecursiveReasoningModelInnerCarry(
             z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
             z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
+            eps=eps,
         )
+
+    def _prior_latent(self, h: torch.Tensor, carry: GenerativeRecursiveReasoningModelInnerCarry):
+        """z, mu, logvar from the prior: per position from p(z | h), or the sample's own latent copied to every position."""
+        if carry.eps is None:
+            return self.variational.sample_prior(h)
+        B, N, _ = h.shape
+        z = carry.eps[:, None, :].expand(B, N, -1)
+        zeros = torch.zeros_like(z)
+        return z, zeros, zeros
 
     def forward(self, carry: GenerativeRecursiveReasoningModelInnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[GenerativeRecursiveReasoningModelInnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         seq_info = dict(
@@ -458,7 +477,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                         y_tar = F.one_hot(batch["labels"].long().clamp_min(0), num_classes=self.config.vocab_size).to(torch.float32)  # Ignored labels (-100) read as token 0
                     z, _, _ = self.variational.sample_posterior(h_t, y_tar)
                 else:
-                    z, _, _ = self.variational.sample_prior(h_t)
+                    z, _, _ = self._prior_latent(h_t, carry)
                 # Decode: condition h_t on z (per-token z)
                 B, N, _ = z.shape
                 z_flat = z.reshape(B * N, -1)  # (B*N, latent_dim)
@@ -480,7 +499,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         sample_in = h_T
         # Variational sampling
         vae_outputs = {}
-        z_pred, prior_mu, prior_logvar = self.variational.sample_prior(sample_in)
+        z_pred, prior_mu, prior_logvar = self._prior_latent(sample_in, carry)
         vae_outputs['prior_mu'] = prior_mu
         vae_outputs['prior_logvar'] = prior_logvar
 
@@ -506,7 +525,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
 
         # LM Outputs
         z_H_conditioned = torch.cat([puzzle_emb, h_T_conditioned], dim=1)
-        new_carry = GenerativeRecursiveReasoningModelInnerCarry(z_H=z_H_conditioned.detach(), z_L=z_L.detach())
+        new_carry = GenerativeRecursiveReasoningModelInnerCarry(z_H=z_H_conditioned.detach(), z_L=z_L.detach(), eps=carry.eps)
         if self.config.use_patchify:
             # (B, num_patches, hidden) -> (B, num_patches, p*p*C*vocab) -> (B, C, H, W, vocab) -> (B, seq, vocab)
             patch_logits = self.patch_out(h_T_conditioned)
@@ -533,6 +552,9 @@ class GenerativeRecursiveReasoningModel(nn.Module):
         self.config = GenerativeRecursiveReasoningModelConfig(**config_dict)
         assert self.config.train_latent in ("posterior", "prior"), f"train_latent must be posterior or prior, got {self.config.train_latent}"
         assert self.config.prior_noise in ("learned", "standard"), f"prior_noise must be learned or standard, got {self.config.prior_noise}"
+        assert self.config.latent_scope in ("token", "sample"), f"latent_scope must be token or sample, got {self.config.latent_scope}"
+        assert self.config.latent_scope == "token" or (self.config.train_latent == "prior" and self.config.prior_noise == "standard"), \
+            "latent_scope=sample needs train_latent=prior and prior_noise=standard"
         print("Initializing GRAM with config:", self.config)
         self.inner = GenerativeRecursiveReasoningModelInner(self.config)
 

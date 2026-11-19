@@ -12,7 +12,9 @@
 #                     maze, with 225 labelled cells, gets 4.5 / 225 = 0.02
 #   gram_std_bestofk  Same backbone with N(0, I) latents, so the label never reaches the latent (no posterior, no KL,
 #                     no beta): ROLLOUTS samples per input (default 8), and only the one closest to a stored solution
-#                     trains. Same 768 sequences per step, so 768 / ROLLOUTS inputs per step
+#                     trains. Same 768 sequences per step, so 768 / ROLLOUTS inputs per step. LATENT_SCOPE=sample
+#                     draws one latent per sample, shared by all positions and kept for the whole sample, instead of a
+#                     new one per position and cycle (run name gets _sample)
 #
 # STEPS (default 150000), SEED (default 42), RESUME=1 (continue an interrupted run from its latest checkpoint),
 # EXTRA_ARGS (appended to the pretrain.py arguments). Checkpoints go to checkpoints/<project>/<run>.
@@ -40,8 +42,8 @@ case $method in
   gram_std_bestofk)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}
-    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts}"
-    run=${method}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
+    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}"
+    run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
   *) echo "Unknown method: ${method} (gram, gram_std_bestofk)"; exit 1 ;;
 esac
 [ -z "${EXTRA_ARGS}" ] || arch_args="${arch_args} ${EXTRA_ARGS}"
