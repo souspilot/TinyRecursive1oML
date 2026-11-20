@@ -496,8 +496,11 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         grad_calls = self.config.L_cycles + 1
         s = carry.z_H
         with torch.no_grad():
-            for _ in range(self.config.H_cycles * grad_calls - grad_calls):
+            for i in range(self.config.H_cycles * grad_calls - grad_calls):
                 s = call(s)
+                # Test-time noise after each intermediate cycle, as on the trm path
+                if self.state_noise > 0 and (i + 1) % grad_calls == 0:
+                    s = s + self.state_noise * torch.randn_like(s)
         for _ in range(grad_calls):
             s = call(s)
 
