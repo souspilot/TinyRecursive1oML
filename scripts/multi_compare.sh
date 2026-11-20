@@ -20,6 +20,8 @@
 #                     (default: a new random start state per sample) and/or LATENT_SCOPE=sample (default none: an N(0, I)
 #                     latent per sample added to the input). STRM_MIN_RATE sets the slowest rate (default 1/13)
 #
+# TRAIN_NOISE (best-of-K methods) adds state noise of that standard deviation during training too, the noise that
+# multi_evaluate.sh NOISE adds at test time (run name gets _tn<TRAIN_NOISE>).
 # STEPS (default 150000), SEED (default 42), RESUME=1 (continue an interrupted run from its latest checkpoint),
 # EXTRA_ARGS (appended to the pretrain.py arguments). Checkpoints go to checkpoints/<project>/<run>.
 set -e
@@ -48,15 +50,15 @@ case $method in
   gram_std_bestofk)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}
-    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}"
-    run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
+    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}${TRAIN_NOISE:+ arch.train_state_noise=${TRAIN_NOISE}}"
+    run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${TRAIN_NOISE:+_tn${TRAIN_NOISE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
   strm_bestofk)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}
     scope=${LATENT_SCOPE:-none}
     init=${STRM_INIT:-sample}
-    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts} arch.recursion=strm arch.latent_scope=${scope} arch.strm_init=${init}${STRM_MIN_RATE:+ arch.strm_min_rate=${STRM_MIN_RATE}}"
-    run=strm_bestofk_init${init}_latent${scope}${STRM_MIN_RATE:+_amin${STRM_MIN_RATE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
+    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts} arch.recursion=strm arch.latent_scope=${scope} arch.strm_init=${init}${STRM_MIN_RATE:+ arch.strm_min_rate=${STRM_MIN_RATE}}${TRAIN_NOISE:+ arch.train_state_noise=${TRAIN_NOISE}}"
+    run=strm_bestofk_init${init}_latent${scope}${STRM_MIN_RATE:+_amin${STRM_MIN_RATE}}${TRAIN_NOISE:+_tn${TRAIN_NOISE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
   *) echo "Unknown method: ${method} (gram, gram_std_bestofk, strm_bestofk)"; exit 1 ;;
 esac
 [ -z "${EXTRA_ARGS}" ] || arch_args="${arch_args} ${EXTRA_ARGS}"

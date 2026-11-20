@@ -88,6 +88,9 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
     # Start state of a sample: "fixed" (one random vector for all samples and positions, as in STRM) or "sample" (a new
     # N(0, I) vector per sample, shared by its positions), which makes the start state a sample-level random choice
     strm_init: str = "fixed"
+    # Training only: N(0, train_state_noise^2) noise on the high-level state after each intermediate cycle, the same
+    # noise sample_predictions.py --state_noise adds at test time, so the model learns to answer from noisy states
+    train_state_noise: float = 0.0
 
     # Variational sampling control (for ablation)
     fix_mu: bool = False  # If True, force mu = 0 (both prior and posterior)
@@ -494,13 +497,14 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
             return (1 - rates) * s + rates * out.to(torch.float32)
 
         grad_calls = self.config.L_cycles + 1
+        noise = self.config.train_state_noise if self.training else self.state_noise
         s = carry.z_H
         with torch.no_grad():
             for i in range(self.config.H_cycles * grad_calls - grad_calls):
                 s = call(s)
-                # Test-time noise after each intermediate cycle, as on the trm path
-                if self.state_noise > 0 and (i + 1) % grad_calls == 0:
-                    s = s + self.state_noise * torch.randn_like(s)
+                # State noise after each intermediate cycle, as on the trm path
+                if noise > 0 and (i + 1) % grad_calls == 0:
+                    s = s + noise * torch.randn_like(s)
         for _ in range(grad_calls):
             s = call(s)
 
@@ -532,6 +536,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
 
         # Forward iterations
         z_H, z_L = carry.z_H, carry.z_L
+        noise = self.config.train_state_noise if self.training else self.state_noise
         # H_cycles-1 without grad
         with torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
@@ -557,8 +562,8 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                 z_proj_flat = self.variational.z_proj(z_flat)  # (B*N, hidden_size)
                 z = z_proj_flat.reshape(B, N, -1).to(self.forward_dtype)  # (B, N, D)
                 h_t_conditioned = h_t + z
-                if self.state_noise > 0:
-                    h_t_conditioned = h_t_conditioned + self.state_noise * torch.randn_like(h_t_conditioned)
+                if noise > 0:
+                    h_t_conditioned = h_t_conditioned + noise * torch.randn_like(h_t_conditioned)
                 z_H = torch.cat([puzzle_emb, h_t_conditioned], dim=1)
 
         # 1 with grad
