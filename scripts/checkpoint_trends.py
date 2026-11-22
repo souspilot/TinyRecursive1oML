@@ -1,6 +1,6 @@
 """Print how validity and diversity change over a run's checkpoints, with the summary used to compare methods.
 
-Usage: python scripts/checkpoint_trends.py <run> [maze nqueens sudoku graph heyawake]    (after scripts/score_checkpoints.sh)
+Usage: python scripts/checkpoint_trends.py <run> [maze nqueens sudoku graph heyawake nurikabe lightup]    (after scripts/score_checkpoints.sh)
 
 ratio and distinct are on multi-solution inputs, among 100 samples; unique is the validity on unique-solution inputs.
 Single checkpoints are noisy (ratio moves by ~0.04 between neighbouring ones), so:
@@ -80,7 +80,7 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     run = sys.argv[1]
-    for task in sys.argv[2:] or ["maze", "nqueens", "sudoku", "graph", "heyawake"]:
+    for task in sys.argv[2:] or ["maze", "nqueens", "sudoku", "graph", "heyawake", "nurikabe", "lightup"]:
         report(task, run)
 
 
