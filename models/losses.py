@@ -44,7 +44,7 @@ def token_log_probs(logits, loss_type: str):
 
 class ACTLossHead(nn.Module):
     def __init__(self, model: nn.Module, loss_type: str, kl_coef: float = 0.0, kl_balance_alpha: Optional[float] = None, free_bits: Optional[float] = None, value_coef: float = 1.0, data_path: Optional[str] = None,
-                 one_of_many: str = "naive", rollouts: int = 1):
+                 one_of_many: str = "naive", rollouts: int = 1, forced_weight: float = 0.3):
         super().__init__()
         self.model = model
         self.loss_type = loss_type
@@ -68,13 +68,40 @@ class ACTLossHead(nn.Module):
 
         # naive trains on `labels`. bestofk (needs `label_set` from a -1oml dataset, with an example's rollouts side by
         # side in the batch) trains only the rollout closest to any stored solution (best-of-many, Bhattacharyya et al.
-        # 2018). With one rollout this is the loss to the closest stored solution (MinLoss, Nandwani et al. 2021)
-        assert one_of_many in ("naive", "bestofk"), f"one_of_many must be naive or bestofk, got {one_of_many}"
+        # 2018). With one rollout this is the loss to the closest stored solution (MinLoss, Nandwani et al. 2021).
+        # The other two also train every rollout: nearest trains each rollout towards its own closest stored solution;
+        # balanced gives each stored solution a share of ceil(K / stored) rollouts, assigned closest pair first, so the
+        # rollouts spread over the solutions. A rollout whose assigned solution is not its own closest has weight
+        # forced_weight, so it moves there gradually.
+        assert one_of_many in ("naive", "bestofk", "nearest", "balanced"), \
+            f"one_of_many must be naive, bestofk, nearest or balanced, got {one_of_many}"
         self.one_of_many = one_of_many
         self.rollouts = rollouts
+        self.forced_weight = forced_weight
 
     def initial_carry(self, *args, **kwargs):
         return self.model.initial_carry(*args, **kwargs)  # type: ignore
+
+    @staticmethod
+    def balanced_assignment(costs: torch.Tensor, valid: torch.Tensor, k: int) -> torch.Tensor:
+        """Stored solution assigned to each rollout. costs, valid: (G * k, S), an example's k rollouts in consecutive rows.
+
+        Each stored solution takes at most ceil(k / number stored) rollouts; pairs are assigned closest first."""
+        g, s = costs.shape[0] // k, costs.shape[1]
+        cost = torch.where(valid, costs, torch.inf).view(g, k, s)
+        stored = valid.view(g, k, s)[:, 0].sum(-1).clamp_min(1)
+        share = (k + stored - 1) // stored  # (g,)
+        used = torch.zeros(g, s, dtype=torch.long, device=costs.device)
+        assigned = torch.full((g, k), -1, dtype=torch.long, device=costs.device)
+        rows = torch.arange(g, device=costs.device)
+        for _ in range(k):
+            free = cost.masked_fill((assigned >= 0).unsqueeze(-1), torch.inf)
+            free = free.masked_fill((used >= share.unsqueeze(-1)).unsqueeze(1), torch.inf)
+            pair = free.view(g, -1).argmin(-1)
+            rollout, solution = pair // s, pair % s
+            assigned[rows, rollout] = solution
+            used[rows, solution] += 1
+        return assigned.view(-1)
 
     def target_set_losses(self, logits: torch.Tensor, label_set: torch.Tensor):
         """Mean token loss of the prediction against every candidate target.
@@ -106,7 +133,8 @@ class ACTLossHead(nn.Module):
 
         # Best-of-K: each rollout's closest stored solution, then only the best rollout of each example trains
         target_weights = None
-        if self.one_of_many == "bestofk":
+        forced_share = None
+        if self.one_of_many in ("bestofk", "nearest", "balanced"):
             assert "post_mu" not in outputs, "bestofk requires latents that do not see the label (train_latent=prior)"
             assert "label_set" in new_carry.current_data, "bestofk needs a -1oml dataset (label_set)"
             label_set = new_carry.current_data["label_set"]
@@ -115,7 +143,14 @@ class ACTLossHead(nn.Module):
             with torch.no_grad():
                 minloss_weights = F.one_hot(torch.where(target_valid, target_losses, torch.inf).argmin(-1), label_set.shape[1]).to(target_losses.dtype)
                 target_weights = minloss_weights
-                if self.training:
+                if self.training and self.one_of_many == "balanced":
+                    nearest = minloss_weights.argmax(-1)
+                    assigned = self.balanced_assignment(target_losses, target_valid, self.rollouts)
+                    forced = assigned != nearest
+                    weight = torch.where(forced, self.forced_weight, 1.0).to(target_losses.dtype)
+                    target_weights = F.one_hot(assigned, label_set.shape[1]).to(target_losses.dtype) * weight.unsqueeze(-1)
+                    forced_share = forced.to(torch.float32)
+                elif self.training and self.one_of_many == "bestofk":
                     # The chosen rollout's weight is K, so each example's reconstruction loss has the same scale as
                     # with one rollout, against the halting loss that every rollout still gets
                     k = self.rollouts
@@ -195,6 +230,9 @@ class ACTLossHead(nn.Module):
                 earlier = torch.tril(torch.ones(self.rollouts, self.rollouts, dtype=torch.bool, device=preds.device), diagonal=-1)
                 distinct = self.rollouts - (same & earlier).any(-1).sum(-1)
                 metrics["rollout_distinct"] = torch.where(valid_metrics, (distinct.float() / self.rollouts).repeat_interleave(self.rollouts), 0).sum()
+            # Share of rollouts trained towards a stored solution other than their own closest (balanced only)
+            if forced_share is not None:
+                metrics["forced_share"] = torch.where(valid_metrics, forced_share, 0).sum()
 
         # Losses
         if target_weights is None:
