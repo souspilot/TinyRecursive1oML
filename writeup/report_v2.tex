@@ -1,0 +1,849 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+\setlist{itemsep=2pt}
+
+% Numbers still to be filled in from results/<dataset>-<split>/summary.md and logs/check_data.log
+\newcommand{\tbd}{\textcolor{red}{\textbf{??}}}
+\newcommand{\bok}{best-of-$K$}
+
+\title{Five Multi-Solution Benchmarks and a Prior-Only Baseline\\[4pt]
+\large Project report v2: datasets, baseline, reference numbers}
+\author{Harshit Bisht (2025AIZ8455), Ashwendh Choudhary (2026AIY7513)}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study GRAM~\cite{baek2026gram}, a recursive reasoning model with a latent variable, on problems with many correct
+answers, around three questions: how to choose its KL weight $\beta$ (Q1), whether training the latent through an
+answer-seeing posterior is ever harmful (Q2), and whether a model produces valid solutions it never saw in training
+(Q3). Before testing any intervention we fix the ground: five datasets whose solution sets are enumerated exactly
+(mazes, N-Queens, Sudoku, graph 3-colouring and random 3-SAT), each storing at most 16 solutions per training input so
+that the rest are held out; one baseline that never feeds the answer to the latent (GRAM's network trained with
+$\mathcal{N}(0,I)$ latents and a best-of-$K$ objective); and one set of metrics computed by the same code on every
+task. This report describes the three and records the baseline's numbers. Everything later is measured against
+them.
+\end{abstract}
+
+\section{Why this report}
+
+Earlier work in the project (report v1) compared deterministic TRMs, one-of-many objectives and GRAM on mazes and
+N-Queens, with metrics defined slightly differently on each task. Following the supervisor's redirection (6 Nov), the
+project now studies GRAM itself (Q1--Q3). Answers to these questions are comparisons between models and between
+tasks, so they need datasets built the same way, a baseline trained the same way on all of them, and metrics that
+mean the same thing everywhere. That is the content of this report; it contains no intervention.
+
+\section{Datasets}
+
+\subsection{Common construction}
+
+All five datasets are built by \texttt{scripts/build\_multi\_datasets.sh} and share one design.
+\begin{itemize}
+  \item \textbf{Exact solution sets.} Every solution of every input is enumerated (dynamic programming over BFS
+  layers for mazes, backtracking or bitmask search elsewhere), so the solution count $k(x)$ is exact.
+  \item \textbf{Controlled ambiguity.} Each task has a knob that moves $k(x)$ from 1 to hundreds or thousands
+  (Table~\ref{tab:datasets}). Inputs are drawn until each group of solution counts has its quota: one third have a
+  unique solution, the rest are spread evenly over groups (for Sudoku, graph colouring and SAT: 2--3, 4--15, 16--63,
+  64--255, 256+; mazes use log$_2$-spaced groups). So every level of ambiguity is equally represented, rather than
+  whatever the generator produces most often. N-Queens is the exception: its inputs are all boards with 1--3 queens
+  given, with their natural distribution of counts.
+  \item \textbf{Stored and held-out solutions.} Each training input stores at most 16 of its solutions, drawn
+  uniformly; training only ever sees these. On inputs with $k(x)>16$ the other $k(x)-16$ are held out, which is what
+  Q3 measures. The exact count is kept with every input.
+  \item \textbf{Disjoint splits.} Test inputs never appear in training (checked; Section~\ref{sec:checks}). This is a
+  change from report v1, where N-Queens test boards were also training boards.
+  \item \textbf{Variants.} Four training sets share one test split: all stored solutions (naive training), one row per
+  input with its set of stored solutions (\texttt{-1oml}, used by the baseline), one fixed solution per input
+  (\texttt{-single}) and unique-solution inputs only (\texttt{-unique}).
+\end{itemize}
+
+\subsection{The five tasks}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lllllll@{}}
+\toprule
+Task & Input & Ambiguity knob & Solutions & Train / test & Seq.\ len & Valid if \\
+\midrule
+Maze & 15$\times$15 grid & walls removed & 1--924 & 100k / 2k & 225 & a shortest path \\
+N-Queens & 10$\times$10 board & queens given & 1--93 & 36{,}907 / 6{,}513 & 100 & no attacks, givens kept \\
+Sudoku & 9$\times$9 grid & clues & 1--1024 & 100k / 2k & 81 & valid, clues kept \\
+Graph col. & 10 nodes & edge density & 1--9842 & 100k / 2k & 55 & proper 3-colouring \\
+3-SAT & 16 variables & clause density & 1--10{,}576 & 100k / 2k & 232 & all clauses true \\
+\bottomrule
+\end{tabular}
+\caption{The five datasets. Solution ranges are over train and test (graph colouring: up to 6561 in train, 9842 in
+test).}
+\label{tab:datasets}
+\end{table}
+
+\paragraph{Mazes.} A spanning-tree maze on a 7$\times$7 lattice of rooms, with each remaining inner wall removed with
+some probability to create loops, and a start and goal at least 8 steps apart. The label marks the cells of one
+shortest path; any shortest path is correct. The number of shortest paths and each cell's share of them are computed
+exactly.
+
+\paragraph{N-Queens.} All 724 solutions of 10-Queens, with 7, 8 or 9 queens removed; each distinct partial board is
+one input, and its completions are its solutions. 15\% of distinct inputs form the test split. Training inputs store
+up to 16 completions; test inputs store all of them.
+
+\paragraph{Sudoku.} A random complete grid with 26--50 clues kept at random cells; puzzles with more than 1024
+solutions are discarded. The label is the whole solved grid.
+
+\paragraph{Graph 3-colouring.} A colouring of 10 nodes is planted and each pair of differently coloured nodes is joined
+with probability $p\sim U[0.1, 1]$, so the graph is always 3-colourable. Colourings are counted in \emph{canonical
+form} (colours numbered by first appearance), so relabelling the colours never makes a new solution: two solutions
+differ in which nodes share a colour. The maximum, 9842, is the number of partitions of 10 nodes into at most 3
+groups (the empty graph). The input is the upper triangle of the adjacency matrix; the answer is the first 10 tokens.
+Because only about a thousand graphs have $\geq$4096 colourings, the top group is 1024--9842.
+
+\paragraph{Random 3-SAT.} 16 variables and $\alpha\cdot 16$ random 3-clauses with $\alpha\sim U[1, 4.5]$; up to a
+quarter of the variables may be given (fixed to their value in a random solution). Unsatisfiable formulas are
+dropped. Few clauses leave thousands of satisfying assignments; near the threshold ($\alpha\approx4.27$) a handful.
+The answer is the 16 variable slots.
+
+\subsection{Checks}
+\label{sec:checks}
+
+\texttt{scripts/analyze\_multi\_samples.py --check\_data} checks each dataset with the same checkers the evaluation
+uses: every stored solution valid and distinct, the number stored equal to $\min(k(x), 16)$ on training inputs, and
+no input shared between train and test. On small builds of all five tasks every check passes, and a deliberately
+corrupted copy (one broken solution, one duplicate, one leaked input) fails all three corresponding checks. On the full
+datasets every check passes on every input of both splits for mazes, N-Queens, Sudoku and graph colouring; for SAT on all test inputs and the first 20k training inputs. Table~\ref{tab:groups} gives the inputs per group of solution counts.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+& \multicolumn{6}{c}{Solutions per input} & Stored \\
+\cmidrule(lr){2-7}
+Dataset, split & 1 & 2--3 & 4--15 & 16--63 & 64--255 & 256+ & solutions \\
+\midrule
+Maze, train & 33{,}333 & 7{,}408 & 14{,}816 & 14{,}815 & 14{,}814 & 14{,}814 & 885{,}729 \\
+Maze, test & 667 & 149 & 296 & 296 & 296 & 296 & 17{,}701 \\
+N-Queens, train & 13{,}586 & 15{,}427 & 7{,}534 & 293 & 67 & 0 & 102{,}513 \\
+N-Queens, test & 2{,}398 & 2{,}705 & 1{,}358 & 43 & 9 & 0 & 18{,}466 (all) \\
+Sudoku, train & 33{,}333 & 13{,}334 & 13{,}334 & 13{,}333 & 13{,}333 & 13{,}333 & 800{,}363 \\
+Sudoku, test & 667 & 267 & 267 & 267 & 266 & 266 & 15{,}920 \\
+Graph col., train & 33{,}333 & 11{,}112 & 11{,}111 & 11{,}111 & 11{,}111 & 22{,}222 & 850{,}425 \\
+Graph col., test & 667 & 223 & 222 & 222 & 222 & 444 & 17{,}021 \\
+3-SAT, train (first 20k) & 6{,}584 & 2{,}597 & 2{,}659 & 2{,}709 & 2{,}700 & 2{,}751 & 165{,}067 \\
+3-SAT, test & 667 & 267 & 267 & 267 & 266 & 266 & 16{,}385 \\
+\bottomrule
+\end{tabular}
+\caption{Inputs per group of solution counts. Mazes are drawn to log$_2$-spaced groups (2--3, 4--7, 8--15, \dots),
+so 2--3 holds one group and 4--15 two; graph colouring's top two groups (256--1023, 1024--9842) both fall in 256+.
+N-Queens test inputs store all their solutions.}
+\label{tab:groups}
+\end{table}
+
+\paragraph{Consequences.} N-Queens has its natural distribution of counts: only 360 training inputs (1\%) have more
+than 16 solutions, none more than 93, so Q3 on N-Queens rests on few inputs and small held-out sets. Mazes, Sudoku,
+graph colouring and SAT each have about 40--44k training inputs with 16 or more solutions. N-Queens also has a third as many training inputs as
+the others, so at the same step budget it is seen about 130 times instead of 48.
+
+\section{Baseline: prior-only best-of-$K$}
+
+\subsection{Model}
+
+The network is GRAM's~\cite{baek2026gram}, itself a TRM~\cite{jolicoeur2025trm} with a latent variable: a 2-layer
+transformer block (hidden size 512, 8 heads, $\sim$10.9M parameters) applied recursively, with 3 high-level cycles of
+4 low-level cycles per supervision step and up to 16 supervision steps (deep supervision with a learned halting head).
+After each high-level cycle, every output position $i$ gets a fresh latent $z_i\in\mathbb{R}^{256}$, projected and
+added to the state: $h_i \leftarrow h_i + W z_i + b$. A rollout therefore draws a new latent up to $3\times16=48$
+times.
+
+GRAM draws $z$ during training from a posterior $q(z\mid x, y)$ that sees the target, at test time from a learned prior
+$p(z\mid x)$, and adds $\beta\,\mathrm{KL}(q\,\|\,p)$ to the loss. The baseline removes the posterior: the latent never
+sees the answer, during training or test, so there is no KL term and no $\beta$. This is the simplest model that can
+answer Q2 (can we do without the posterior?) and gives Q1 a reference that has no $\beta$ at all.
+
+\paragraph{Noise distribution.} The baseline draws $z_i\sim\mathcal{N}(0,I)$. Because $z$ enters through the learned
+map $W$, the injected noise $Wz_i+b$ is $\mathcal{N}(b, WW^\top)$: its mean and covariance are still learned, but they
+are the same for every input and position, and nothing in the loss can make them diverge. We first used GRAM's learned
+prior $p(z\mid x)$ instead, whose log-variance is unconstrained once the KL term is gone. That version went NaN late in
+training on graph colouring, and on N-Queens its training accuracy fell from about 0.7 to 0.2 over the last fifth of
+training, while the $\mathcal{N}(0,I)$ version trained smoothly on both. We keep the learned-prior runs as an ablation
+(Section~\ref{sec:ablation}).
+
+\subsection{Objective}
+
+Each training input $x$ with stored solutions $S(x)$ is rolled out $K=8$ times with independent latents. At every
+supervision step, rollout $j$ produces token distributions $f_j$, and
+\begin{equation}
+  \mathcal{L}(x) = \min_{j\le K}\ \min_{s\in S(x)}\ \ell(f_j, s)
+  \;+\; \frac1K\sum_{j\le K} \mathcal{L}_{\text{halt}}(f_j),
+\end{equation}
+where $\ell$ is the mean token cross-entropy (stablemax, as in TRM) and the halting loss trains each rollout's halting
+head to predict whether its current answer is valid. Only the best rollout receives the reconstruction gradient,
+towards its closest stored solution; it is weighted by $K$ so that the loss has the same scale as with one rollout.
+The best rollout is chosen afresh at every supervision step. This is best-of-many sample
+training~\cite{bhattacharyya2018bestofmany}, here combined with MinLoss over solutions~\cite{nandwani2021oneofmany}.
+
+\paragraph{What this objective rewards.} Any model whose every sample is some stored solution reaches zero loss,
+whether it always returns the same one or spreads evenly over all of them. The objective is therefore indifferent
+between collapse and coverage; whatever diversity the baseline shows comes from training dynamics, not from the loss.
+This is a deliberate choice for a baseline: it is the weakest diversity pressure that still trains, so any
+intervention that targets diversity has a clean reference. Variants that do reward coverage (IMLE~\cite{li2018imle},
+which picks a random stored target and trains the nearest sample to it; matching samples to solutions one to one) are
+interventions, not baselines.
+
+\paragraph{Halting target.} The halting head's target is validity under the task's checker for mazes, N-Queens,
+Sudoku and graph colouring; for SAT it is ``matches the closest stored solution'', which undercounts valid answers.
+\texttt{train/exact\_accuracy} in the training logs follows the same definitions and is a single-sample rate over all
+rollouts, not best-of-$K$.
+
+\subsection{Training}
+
+Batch 768 sequences ($96$ inputs $\times$ 8 rollouts), learning rate $10^{-4}$ (constant after warm-up), weight decay
+1.0, EMA weights, $\sim$50k steps, so each 100k-input dataset is seen about 48 times. Rollouts of one input halt
+together. SAT uses learned position embeddings instead of RoPE, so each clause slot has a fixed embedding. One seed
+(42). Launch: \texttt{bash scripts/multi\_compare.sh <dataset> gram\_std\_bestofk}.
+
+\section{Evaluation protocol and metrics}
+
+Each model draws 100 samples per input, each with fresh latents, running all 16 supervision steps
+(\texttt{scripts/multi\_evaluate.sh}). The test split has 2000 inputs; for Q3 we also sample the first 2000 training
+inputs (training inputs are stored in random order). All metrics come from \texttt{scripts/analyze\_multi\_samples.py}
+and are reported for all inputs and per group of solution counts (1, 2--3, 4--15, 16--63, 64--255, 256+).
+
+\begin{itemize}
+  \item \textbf{Validity}: the share of samples the task's checker accepts, i.e.\ expected single-sample accuracy.
+  \textbf{Any-valid@$K$}: an input counts if any of its first $K$ samples is valid (an upper bound on what a verifier
+  could pick).
+  \item \textbf{Distinct valid@$K$} on multi-solution inputs, and the \textbf{ratio to uniform}: distinct valid
+  answers divided by the number a uniform sampler over the input's $k$ solutions would find with the same number $v$
+  of valid draws, $k\,(1-(1-1/k)^{v})$. 1 means as diverse as uniform sampling, $1/v$ means one solution repeated. The
+  ratio separates diversity from validity. \textbf{Coverage}: distinct valid / $k$.
+  \item \textbf{Unique-solution inputs}: distinct answers per input (ideally 1: noise should not change an answer that
+  is forced).
+  \item \textbf{Error anatomy} of invalid samples: cells differing from the nearest stored solution, and on
+  multi-solution inputs the share whose every cell agrees with some stored solution while matching none (a
+  \emph{blend} of solutions rather than an error of its own). Both are bounds, since only 16 solutions are stored.
+  \item \textbf{Held-out solutions} (training split, inputs with $k>16$): the share of valid samples that are not among
+  the stored ones, against a uniform sampler's $1-16/k$. Near 0: the model reproduces what it was trained on. Near
+  the uniform share: it produces unseen solutions as readily as seen ones. We also report the share of unseen valid
+  samples that recombine stored ones cell by cell; this must be read against a uniform sampler's value, which is high
+  (about 97\% for graph colouring).
+  \item \textbf{Graph colouring only}: validity up to relabelling, which accepts proper colourings whose colours are
+  not in canonical order.
+\end{itemize}
+
+\paragraph{The metrics on known samplers.} On synthetic samples the analyzer returns the expected values on all five
+tasks: a uniform sampler over all solutions has ratio 1.00 and an unseen share equal to the uniform share (83.9\% vs
+83.6\%); a collapsed sampler finds 1 solution and 0\% unseen; a sampler uniform over the stored solutions has ratio 1
+while $k\le16$ and less above, and 0\% unseen; blends of stored solutions are recognised as blends (98--100\%) and
+random noise is not (0--2\%); relabelled colourings are 0\% valid strictly and 100\% up to relabelling.
+
+\section{Baseline results at 50k steps}
+
+\paragraph{Status.} These are the first, 50k-step versions of the baseline, recorded before any longer run. They are
+a snapshot, not the final reference: we have not checked convergence, and the maze model is the likeliest to be
+undertrained (in report v1, maze models kept improving between 50k and 100k steps). The reference baseline will be
+trained for 150k steps with two seeds, with every checkpoint scored on a validation split (Section~\ref{sec:next}).
+3-SAT is reported but did not learn (Section~\ref{sec:obs}).
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+& Maze & N-Queens & Sudoku & Graph col. & 3-SAT \\
+\midrule
+Validity, all inputs & 76.7 & 96.9 & 99.7 & 99.5 & 0.4 \\
+\quad unique-solution inputs & 75.0 & 93.2 & 99.8 & 100.0 & 0.0 \\
+\quad multi-solution inputs & 77.6 & 99.1 & 99.6 & 99.3 & 0.7 \\
+Any-valid@100 & 93.2 & 100.0 & 100.0 & 100.0 & 12.9 \\
+Distinct valid@100 (multi) & 1.7 & 3.3 & 4.6 & 35.7 & 0.6 \\
+Ratio to uniform & 0.13 & 0.89 & 0.27 & 0.75 & n/a \\
+Coverage & 9.9 & 89.2 & 24.0 & 46.8 & 0.5 \\
+Distinct answers, unique inputs & 13.6 & 5.17 & 1.11 & 1.02 & 93.7 \\
+Invalid: cells off nearest stored (median) & 13 & 7 & 22 & 1 & 6 \\
+Invalid: blends (multi) & 60.7 & 22.7 & 3.3 & 94.5 & 22.0 \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Training inputs with more than 16 solutions (Q3)}} \\
+Inputs & 881 & 14 & 801 & 876 & 781 \\
+Unseen share of valid samples & 72.0 & 30.6 & 76.9 & 84.7 & n/a \\
+\quad uniform sampler & 71.9 & 35.7 & 76.8 & 84.7 & n/a \\
+\bottomrule
+\end{tabular}
+\caption{Prior-only best-of-8 with $\mathcal{N}(0,I)$ latents (\texttt{gram\_std\_bestofk}, seed 42, 50k steps), 100
+samples per input, test split (N-Queens: 6513 inputs, others 2000) except the Q3 rows (first 2000 training inputs).
+Multi-solution validity is the input-weighted mean over groups. n/a: 3-SAT has too few valid samples (0.4\%) for
+diversity or held-out shares to mean anything. Diversity averages differ across tasks partly because
+the tasks have different mixes of solution counts; Table~\ref{tab:ratio} compares them group by group. Per-group
+tables are in Appendix~\ref{app:groups}.}
+\label{tab:baseline}
+\end{table}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Solutions & 2--3 & 4--15 & 16--63 & 64--255 & 256+ \\
+\midrule
+Maze & 0.48 & 0.17 & 0.06 & 0.05 & 0.10 \\
+N-Queens & 0.92 & 0.84 & 0.71 & 0.61 & -- \\
+Sudoku & 0.61 & 0.37 & 0.15 & 0.09 & 0.10 \\
+Graph colouring & 0.94 & 0.81 & 0.59 & 0.58 & 0.80 \\
+3-SAT & n/a & n/a & n/a & n/a & n/a \\
+\bottomrule
+\end{tabular}
+\caption{Ratio of distinct valid answers to a uniform sampler's, by number of solutions ($\mathcal{N}(0,I)$, 50k
+steps, test split). N-Queens has 43 test inputs at 16--63 and 9 at 64--255, and none above 93 solutions.}
+\label{tab:ratio}
+\end{table}
+
+\subsection{First observations}
+\label{sec:obs}
+
+These describe the numbers; they are not yet claims, since every run is one seed at 50k steps.
+\begin{itemize}
+  \item \textbf{3-SAT did not learn.} 0.4\% of samples are valid, none on unique-solution formulas, where 100 samples
+  give 93.7 distinct answers: the outputs are close to random. Its training loss rose over the run, and in October
+  GRAM failed on SAT the same way, so the cause is likely in the task setup rather than this run; it needs its own
+  diagnosis before SAT can serve as a benchmark. Even its best group (256+ solutions, 2.5\% valid) may be no better
+  than a random assignment, which is valid with probability $k/2^{\text{free variables}}\ge 0.4\%$ there and up to
+  about 11\% (the test maximum, 7012 solutions over $2^{16}$ assignments); the chance baseline (Section~\ref{sec:next}) will settle it. The learned prior fails the same way.
+  \item \textbf{Single samples are valid on three of the other four tasks}: 96.9--99.7\% on N-Queens, Sudoku and
+  graph colouring. Mazes are the exception (76.7\%), with validity falling from 89\% at 16--63 paths to 53\% at 256+.
+  \item \textbf{The same objective gives very different diversity on different tasks}, also at matched numbers of
+  solutions (Table~\ref{tab:ratio}). At 16--63 solutions the ratio to uniform is 0.71 on N-Queens and 0.59 on graph
+  colouring but 0.15 on Sudoku and 0.06 on mazes. Graph colouring keeps it at 256+ (74.8 distinct valid colourings in
+  100 samples, uniform 93.4); Sudoku and mazes fall to about 0.1 (9.1 and 2.7 distinct).
+  \item \textbf{Whether noise changes forced answers is also task-dependent.} On unique-solution inputs, Sudoku and
+  graph colouring give one answer (1.11 and 1.02 distinct per input). Mazes give 13.6 distinct answers at 75\%
+  validity and N-Queens 5.2 at 93\%: there the latent varies errors rather than choosing among solutions.
+  \item \textbf{Training inputs are sampled like new ones.} Validity and diversity on the first 2000 training inputs
+  match the test split group by group on every task.
+  \item \textbf{No preference for stored solutions (Q3).} On training inputs with more than 16 solutions, the share
+  of valid samples that were never stored for that input equals a uniform sampler's to within about 1 point on
+  mazes, Sudoku and graph colouring (881, 801 and 876 inputs), with both noise types. The baseline produces unseen
+  solutions exactly as often as seen ones. This says nothing about \emph{how many} it produces: on mazes, 1.6 distinct
+  unseen paths per input. The recombination share (unseen samples made only of cells from stored solutions; 58\% on
+  Sudoku, 76\% on mazes, 98\% on graph colouring) cannot be read without a uniform reference.
+  \item \textbf{Errors differ in kind}: one cell from a stored solution on graph colouring (median), 7 on N-Queens,
+  13 on mazes, 22 on Sudoku.
+\end{itemize}
+
+\subsection{Ablation: learned prior}
+\label{sec:ablation}
+
+The same objective with GRAM's learned prior $p(z\mid x)$ (\texttt{gram\_prior\_bestofk}), whose variance nothing
+constrains once the KL term is gone. Graph colouring went NaN at step 43{,}071, after its halting loss became erratic
+from about step 37.5k; we score its last checkpoint before that, step 37{,}494 (the one exception to the
+final-checkpoint rule), and also step 41{,}660, inside the erratic phase.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+& \multicolumn{2}{c}{Validity} & \multicolumn{2}{c}{Distinct answers, unique} & \multicolumn{2}{c}{Ratio to uniform} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(l){6-7}
+Task & learned & $\mathcal{N}(0,I)$ & learned & $\mathcal{N}(0,I)$ & learned & $\mathcal{N}(0,I)$ \\
+\midrule
+Maze & 74.2 & 76.7 & 11.7 & 13.6 & 0.15 & 0.13 \\
+N-Queens & 48.0 & 96.9 & 37.2 & 5.17 & 0.91 & 0.89 \\
+Sudoku & 99.5 & 99.7 & 1.10 & 1.11 & 0.40 & 0.27 \\
+Graph col., step 37{,}494 & 37.0 & 99.5 & 7.45 & 1.02 & 0.74 & 0.75 \\
+Graph col., step 41{,}660 & 7.1 & & 69.2 & & 0.84 & \\
+3-SAT & 0.3 & 0.4 & 99.9 & 93.7 & n/a & n/a \\
+\bottomrule
+\end{tabular}
+\caption{Learned prior against $\mathcal{N}(0,I)$, 50k steps, test split.}
+\label{tab:ablation}
+\end{table}
+
+The effect of the learned prior depends on the task.
+\begin{itemize}
+  \item \textbf{Sudoku: more diversity at no cost.} Equally valid (99.5\% vs 99.7\%), equally firm on forced answers
+  (1.10 vs 1.11), and more diverse: ratio 0.40 against 0.27, 23.2 against 9.1 distinct valid solutions at 256+.
+  \item \textbf{N-Queens and graph colouring: errors, not coverage.} Half as valid or less (48\% vs 97\%, 37\% vs
+  99.5\%), with forced answers changed far more often (37 and 7.5 distinct answers per unique input) and the same
+  ratio to uniform.
+  \item \textbf{Mazes: no real difference} (74.2\% vs 76.7\% valid, ratio 0.15 vs 0.13).
+  \item \textbf{Graph colouring's instability destroyed the model before the NaN}: 7.1\% validity at step 41{,}660.
+  \item \textbf{Q3 is unchanged}: the unseen share matches a uniform sampler's with the learned prior too (Sudoku
+  77.7\% vs 76.8\%, graph colouring 90.0\% vs 89.7\%).
+\end{itemize}
+We had predicted that $\mathcal{N}(0,I)$ would be as diverse or less, and clearly more valid where the learned prior
+was unstable; both held. Our earlier Sudoku prediction, that 30--60\% of valid samples on training inputs would be
+unseen, was wrong (77.7\%).
+
+\section{Next steps}
+\label{sec:next}
+
+\begin{itemize}
+  \item \textbf{150k-step baseline, two seeds, every checkpoint scored on a validation split} (new inputs from the same
+  generators, checked for no overlap). The reported number stays the final checkpoint; the curves show whether
+  validity and diversity have stopped changing, whether training and validation inputs agree, and whether diversity
+  drifts down over long training under an objective indifferent to it. Graph colouring is also trained from scratch
+  alongside a continuation of its 50k run, to check that continuing a run is equivalent to one long run.
+  \item \textbf{Chance baseline}: the validity of a random answer, $k(x)$ over the size of the answer space, per task
+  and group; needed to read SAT and sparse graph colouring.
+  \item \textbf{GRAM} as the second baseline, then interventions.
+\end{itemize}
+
+\section{Known caveats}
+
+\begin{itemize}
+  \item \textbf{One seed} per task. Seed variance on N-Queens was up to 8 points in report v1.
+  \item \textbf{SAT's halting target} counts only stored solutions, so its halting head is trained on a stricter
+  criterion than validity.
+  \item \textbf{Stored solutions bound the error anatomy}: an invalid sample may be close to a solution that is not
+  stored.
+  \item \textbf{The recombination share needs a uniform reference} per task before it can distinguish generalisation
+  from recombination.
+  \item \textbf{Fixed step budget}: all runs here train $\sim$50k steps regardless of dataset size; N-Queens has fewer
+  training inputs and so more epochs.
+\end{itemize}
+
+\appendix
+\section{Per-group results}
+\label{app:groups}
+
+Generated from \texttt{results/<task>-<split>/summary.md}. Cells off: median cells between an invalid sample and the
+nearest stored solution. Blends: share of invalid samples on multi-solution inputs made entirely of cells from stored
+solutions. Held-out figures are per group: unseen share of valid samples vs a uniform sampler's.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 74.2 & 93.5 & 1.8 & 33.6 & 0.15 & 11.0 & 10 & 77.5 \\
+1 & 667 & 76.4 & 88.2 & -- & -- & -- & -- & 18 & -- \\
+2--3 & 149 & 78.3 & 94.0 & 1.1 & 2.3 & 0.52 & 48.5 & 10 & 24.3 \\
+4--15 & 296 & 77.4 & 94.9 & 1.3 & 7.6 & 0.20 & 18.2 & 4 & 63.6 \\
+16--63 & 296 & 71.1 & 95.3 & 1.5 & 25.6 & 0.08 & 4.8 & 6 & 89.3 \\
+64--255 & 296 & 69.2 & 96.6 & 1.8 & 50.9 & 0.06 & 1.4 & 8 & 88.5 \\
+256+ & 296 & 72.1 & 99.0 & 3.0 & 66.3 & 0.06 & 0.6 & 12 & 85.2 \\
+\bottomrule
+\end{tabular}
+\caption{Maze, learned prior, test split. Unique-solution inputs: 11.73 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 76.7 & 93.2 & 1.7 & 31.9 & 0.13 & 9.9 & 13 & 60.7 \\
+1 & 667 & 75.0 & 86.4 & -- & -- & -- & -- & 16 & -- \\
+2--3 & 149 & 79.6 & 90.6 & 1.0 & 2.2 & 0.48 & 43.2 & 14 & 14.0 \\
+4--15 & 296 & 87.6 & 96.3 & 1.2 & 7.9 & 0.17 & 16.2 & 11 & 36.8 \\
+16--63 & 296 & 89.2 & 97.6 & 1.4 & 29.6 & 0.06 & 4.4 & 7 & 68.7 \\
+64--255 & 296 & 79.2 & 99.3 & 1.8 & 56.0 & 0.05 & 1.5 & 9 & 81.2 \\
+256+ & 296 & 53.2 & 96.6 & 2.7 & 49.0 & 0.10 & 0.6 & 14 & 66.4 \\
+\bottomrule
+\end{tabular}
+\caption{Maze, $\mathcal{N}(0,I)$, test split. Unique-solution inputs: 13.56 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 74.7 & 94.0 & 1.8 & 33.5 & 0.14 & 10.9 & 11 & 76.8 \\
+1 & 660 & 77.3 & 89.1 & -- & -- & -- & -- & 18 & -- \\
+2--3 & 144 & 80.3 & 93.1 & 1.1 & 2.2 & 0.49 & 45.6 & 12 & 14.0 \\
+4--15 & 300 & 78.2 & 95.7 & 1.4 & 7.6 & 0.22 & 19.8 & 4 & 62.0 \\
+16--63 & 299 & 71.1 & 95.3 & 1.4 & 25.3 & 0.08 & 4.9 & 5 & 88.4 \\
+64--255 & 297 & 71.3 & 98.0 & 1.9 & 52.3 & 0.05 & 1.6 & 8 & 89.9 \\
+256+ & 300 & 69.6 & 98.0 & 2.9 & 63.8 & 0.06 & 0.6 & 13 & 83.6 \\
+\bottomrule
+\end{tabular}
+\caption{Maze, learned prior, first 2000 training inputs. Unique-solution inputs: 12.64 distinct answers per input. Held-out (881 inputs with more than 16 solutions): 77.8\% of valid samples unseen, uniform 76.4\% (16--63: 48.7 vs 45.5, 64--255: 88.5 vs 86.4, 256+: 95.3 vs 96.4); 1.74 distinct unseen per input; 71.3\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 75.6 & 92.2 & 1.7 & 30.8 & 0.13 & 9.6 & 14 & 58.9 \\
+1 & 660 & 74.3 & 82.7 & -- & -- & -- & -- & 18 & -- \\
+2--3 & 144 & 77.2 & 91.0 & 1.0 & 2.2 & 0.46 & 41.4 & 14 & 8.1 \\
+4--15 & 300 & 86.7 & 95.3 & 1.1 & 7.9 & 0.17 & 16.3 & 11 & 34.5 \\
+16--63 & 299 & 90.5 & 98.3 & 1.4 & 28.8 & 0.06 & 4.8 & 7 & 73.9 \\
+64--255 & 297 & 76.8 & 97.0 & 1.8 & 54.0 & 0.05 & 1.5 & 10 & 76.5 \\
+256+ & 300 & 50.3 & 99.7 & 2.7 & 46.4 & 0.10 & 0.6 & 14 & 65.6 \\
+\bottomrule
+\end{tabular}
+\caption{Maze, $\mathcal{N}(0,I)$, first 2000 training inputs. Unique-solution inputs: 14.04 distinct answers per input. Held-out (881 inputs with more than 16 solutions): 72.0\% of valid samples unseen, uniform 71.9\% (16--63: 44.0 vs 45.3, 64--255: 88.6 vs 85.8, 256+: 94.6 vs 96.2); 1.62 distinct unseen per input; 76.2\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 6513 & 48.0 & 98.5 & 3.3 & 3.8 & 0.91 & 90.1 & 7 & 21.0 \\
+1 & 2398 & 34.5 & 96.5 & -- & -- & -- & -- & 8 & -- \\
+2--3 & 2705 & 53.0 & 99.6 & 2.2 & 2.4 & 0.94 & 93.5 & 7 & 13.8 \\
+4--15 & 1358 & 61.4 & 100.0 & 4.9 & 5.9 & 0.85 & 84.5 & 7 & 36.8 \\
+16--63 & 43 & 65.0 & 100.0 & 12.0 & 17.9 & 0.67 & 64.8 & 7 & 68.7 \\
+64--255 & 9 & 60.4 & 100.0 & 26.8 & 41.8 & 0.64 & 35.2 & 8 & 98.6 \\
+\bottomrule
+\end{tabular}
+\caption{N-Queens, learned prior, test split. Unique-solution inputs: 37.17 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 6513 & 96.9 & 100.0 & 3.3 & 3.9 & 0.89 & 89.2 & 7 & 22.7 \\
+1 & 2398 & 93.2 & 100.0 & -- & -- & -- & -- & 7 & -- \\
+2--3 & 2705 & 98.9 & 100.0 & 2.2 & 2.4 & 0.92 & 92.3 & 7 & 11.8 \\
+4--15 & 1358 & 99.4 & 100.0 & 5.0 & 6.0 & 0.84 & 83.8 & 8 & 61.0 \\
+16--63 & 43 & 99.8 & 100.0 & 12.9 & 18.5 & 0.71 & 70.6 & 8 & 100.0 \\
+64--255 & 9 & 99.9 & 100.0 & 34.3 & 56.1 & 0.61 & 44.1 & 9 & 100.0 \\
+\bottomrule
+\end{tabular}
+\caption{N-Queens, $\mathcal{N}(0,I)$, test split. Unique-solution inputs: 5.17 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 47.0 & 98.3 & 3.2 & 3.8 & 0.91 & 90.6 & 7 & 20.1 \\
+1 & 747 & 33.1 & 96.0 & -- & -- & -- & -- & 8 & -- \\
+2--3 & 843 & 53.4 & 99.5 & 2.2 & 2.4 & 0.95 & 94.5 & 7 & 13.1 \\
+4--15 & 395 & 59.2 & 100.0 & 4.9 & 6.0 & 0.85 & 83.9 & 7 & 35.2 \\
+16--63 & 12 & 59.8 & 100.0 & 12.9 & 19.5 & 0.67 & 59.8 & 7 & 74.5 \\
+64--255 & 3 & 59.0 & 100.0 & 23.7 & 42.1 & 0.56 & 28.2 & 9 & 54.5 \\
+\bottomrule
+\end{tabular}
+\caption{N-Queens, learned prior, first 2000 training inputs. Unique-solution inputs: 38.06 distinct answers per input. Held-out (14 inputs with more than 16 solutions): 31.0\% of valid samples unseen, uniform 33.0\% (16--63: 15.7 vs 20.4, 64--255: 88.1 vs 80.2); 6.86 distinct unseen per input; 39.6\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 96.6 & 100.0 & 3.3 & 3.9 & 0.89 & 89.4 & 7 & 16.2 \\
+1 & 747 & 92.3 & 99.9 & -- & -- & -- & -- & 7 & -- \\
+2--3 & 843 & 99.0 & 100.0 & 2.2 & 2.4 & 0.93 & 93.3 & 7 & 6.3 \\
+4--15 & 395 & 99.3 & 100.0 & 5.0 & 6.0 & 0.82 & 81.9 & 8 & 44.6 \\
+16--63 & 12 & 99.8 & 100.0 & 15.8 & 22.7 & 0.73 & 70.9 & 8 & 33.3 \\
+64--255 & 3 & 100.0 & 100.0 & 32.3 & 57.7 & 0.57 & 41.1 & -- & -- \\
+\bottomrule
+\end{tabular}
+\caption{N-Queens, $\mathcal{N}(0,I)$, first 2000 training inputs. Unique-solution inputs: 5.53 distinct answers per input. Held-out (14 inputs with more than 16 solutions): 30.6\% of valid samples unseen, uniform 35.7\% (16--63: 16.6 vs 23.5, 64--255: 81.7 vs 80.1); 9.57 distinct unseen per input; 34.7\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 99.5 & 100.0 & 10.1 & 39.0 & 0.40 & 33.4 & 16 & 31.6 \\
+1 & 667 & 99.9 & 100.0 & -- & -- & -- & -- & 21 & -- \\
+2--3 & 267 & 99.6 & 99.6 & 1.6 & 2.2 & 0.72 & 71.8 & 24 & 1.0 \\
+4--15 & 267 & 99.5 & 100.0 & 3.3 & 7.0 & 0.51 & 50.9 & 15 & 15.4 \\
+16--63 & 267 & 99.0 & 100.0 & 7.9 & 29.7 & 0.28 & 26.8 & 15 & 33.8 \\
+64--255 & 266 & 99.0 & 100.0 & 14.7 & 67.2 & 0.22 & 12.2 & 17 & 36.9 \\
+256+ & 266 & 99.4 & 100.0 & 23.2 & 89.2 & 0.26 & 5.0 & 11 & 51.2 \\
+\bottomrule
+\end{tabular}
+\caption{Sudoku, learned prior, test split. Unique-solution inputs: 1.10 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 99.7 & 100.0 & 4.6 & 39.1 & 0.27 & 24.0 & 22 & 3.3 \\
+1 & 667 & 99.8 & 100.0 & -- & -- & -- & -- & 28 & -- \\
+2--3 & 267 & 99.4 & 100.0 & 1.3 & 2.3 & 0.61 & 61.4 & 20 & 1.3 \\
+4--15 & 267 & 99.9 & 100.0 & 2.3 & 7.0 & 0.37 & 37.0 & 22 & 20.0 \\
+16--63 & 267 & 99.2 & 100.0 & 4.2 & 29.6 & 0.15 & 14.2 & 18 & 1.9 \\
+64--255 & 266 & 99.9 & 100.0 & 6.2 & 67.6 & 0.09 & 5.3 & 23 & 7.9 \\
+256+ & 266 & 99.8 & 100.0 & 9.1 & 89.6 & 0.10 & 2.0 & 30 & 5.3 \\
+\bottomrule
+\end{tabular}
+\caption{Sudoku, $\mathcal{N}(0,I)$, test split. Unique-solution inputs: 1.11 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 99.6 & 100.0 & 10.6 & 39.7 & 0.40 & 33.0 & 13 & 40.0 \\
+1 & 644 & 100.0 & 100.0 & -- & -- & -- & -- & 24 & -- \\
+2--3 & 279 & 99.8 & 100.0 & 1.6 & 2.3 & 0.73 & 72.5 & 14 & 5.0 \\
+4--15 & 260 & 99.3 & 100.0 & 3.3 & 7.5 & 0.48 & 47.9 & 14 & 8.7 \\
+16--63 & 271 & 99.3 & 100.0 & 8.4 & 30.0 & 0.29 & 27.8 & 12 & 40.4 \\
+64--255 & 264 & 99.3 & 100.0 & 14.8 & 67.6 & 0.22 & 11.9 & 8 & 55.9 \\
+256+ & 282 & 99.1 & 100.0 & 24.4 & 89.5 & 0.27 & 4.9 & 12 & 58.1 \\
+\bottomrule
+\end{tabular}
+\caption{Sudoku, learned prior, first 2000 training inputs. Unique-solution inputs: 1.01 distinct answers per input. Held-out (801 inputs with more than 16 solutions): 77.7\% of valid samples unseen, uniform 76.8\% (16--63: 48.9 vs 45.4, 64--255: 85.6 vs 86.0, 256+: 96.4 vs 96.6); 13.88 distinct unseen per input; 58.7\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 99.9 & 100.0 & 4.8 & 39.9 & 0.26 & 23.6 & 19 & 4.3 \\
+1 & 644 & 100.0 & 100.0 & -- & -- & -- & -- & 20 & -- \\
+2--3 & 279 & 99.7 & 100.0 & 1.4 & 2.3 & 0.64 & 63.5 & 19 & 0.0 \\
+4--15 & 260 & 99.7 & 100.0 & 2.2 & 7.5 & 0.33 & 33.0 & 18 & 2.4 \\
+16--63 & 271 & 99.8 & 100.0 & 4.2 & 30.0 & 0.15 & 14.1 & 18 & 6.2 \\
+64--255 & 264 & 99.9 & 100.0 & 6.4 & 67.9 & 0.09 & 5.2 & 24 & 8.0 \\
+256+ & 282 & 100.0 & 100.0 & 9.5 & 90.2 & 0.11 & 2.0 & 17 & 42.9 \\
+\bottomrule
+\end{tabular}
+\caption{Sudoku, $\mathcal{N}(0,I)$, first 2000 training inputs. Unique-solution inputs: 1.01 distinct answers per input. Held-out (801 inputs with more than 16 solutions): 76.9\% of valid samples unseen, uniform 76.8\% (16--63: 46.1 vs 45.3, 64--255: 85.0 vs 86.0, 256+: 97.1 vs 96.6); 5.71 distinct unseen per input; 58.2\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 37.0 & 93.3 & 16.9 & 22.2 & 0.74 & 25.0 & 2 & 68.8 \\
+1 & 667 & 45.1 & 91.6 & -- & -- & -- & -- & 1 & -- \\
+2--3 & 223 & 27.1 & 83.4 & 1.4 & 1.7 & 0.80 & 63.5 & 2 & 16.1 \\
+4--15 & 222 & 23.8 & 89.2 & 3.2 & 5.0 & 0.66 & 45.6 & 2 & 46.2 \\
+16--63 & 222 & 26.8 & 94.1 & 6.8 & 13.6 & 0.59 & 21.9 & 2 & 78.6 \\
+64--255 & 222 & 28.4 & 98.6 & 13.9 & 23.5 & 0.68 & 11.3 & 2 & 92.8 \\
+256+ & 444 & 45.9 & 100.0 & 38.0 & 44.7 & 0.86 & 3.8 & 3 & 97.9 \\
+\bottomrule
+\end{tabular}
+\caption{Graph colouring, learned prior, step 37{,}494, test split. Unique-solution inputs: 7.45 distinct answers per input. Valid up to relabelling: 37.0\%.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 7.1 & 77.5 & 6.3 & 7.5 & 0.84 & 10.4 & 4 & 46.3 \\
+1 & 667 & 5.3 & 73.9 & -- & -- & -- & -- & 5 & -- \\
+2--3 & 223 & 2.9 & 54.7 & 0.7 & 1.0 & 0.72 & 33.2 & 4 & 3.1 \\
+4--15 & 222 & 2.2 & 63.1 & 1.1 & 1.5 & 0.71 & 17.4 & 4 & 14.2 \\
+16--63 & 222 & 2.7 & 71.6 & 1.9 & 2.5 & 0.79 & 6.2 & 3 & 41.8 \\
+64--255 & 222 & 4.6 & 86.9 & 3.6 & 4.5 & 0.88 & 3.0 & 3 & 63.3 \\
+256+ & 444 & 18.0 & 99.5 & 15.3 & 17.8 & 0.90 & 1.2 & 3 & 84.0 \\
+\bottomrule
+\end{tabular}
+\caption{Graph colouring, learned prior, step 41{,}660, test split. Unique-solution inputs: 69.15 distinct answers per input. Valid up to relabelling: 7.5\%.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 99.5 & 100.0 & 35.7 & 48.9 & 0.75 & 46.8 & 1 & 94.5 \\
+1 & 667 & 100.0 & 100.0 & -- & -- & -- & -- & 1 & -- \\
+2--3 & 223 & 99.7 & 100.0 & 2.1 & 2.3 & 0.94 & 93.7 & 1 & 72.1 \\
+4--15 & 222 & 99.2 & 100.0 & 5.8 & 7.4 & 0.81 & 81.0 & 1 & 94.7 \\
+16--63 & 222 & 98.8 & 100.0 & 17.4 & 30.2 & 0.59 & 55.8 & 1 & 98.5 \\
+64--255 & 222 & 98.7 & 100.0 & 39.3 & 67.3 & 0.58 & 32.1 & 2 & 94.9 \\
+256+ & 444 & 99.6 & 100.0 & 74.8 & 93.4 & 0.80 & 8.8 & 3 & 95.1 \\
+\bottomrule
+\end{tabular}
+\caption{Graph colouring, $\mathcal{N}(0,I)$, test split. Unique-solution inputs: 1.02 distinct answers per input. Valid up to relabelling: 99.5\%.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 36.4 & 93.9 & 17.1 & 22.5 & 0.74 & 24.0 & 2 & 68.2 \\
+1 & 649 & 44.6 & 92.1 & -- & -- & -- & -- & 1 & -- \\
+2--3 & 226 & 28.4 & 88.5 & 1.4 & 1.8 & 0.80 & 66.2 & 2 & 15.8 \\
+4--15 & 225 & 21.3 & 84.4 & 2.7 & 4.7 & 0.60 & 38.4 & 2 & 40.2 \\
+16--63 & 210 & 20.7 & 95.2 & 6.5 & 12.2 & 0.62 & 20.5 & 2 & 79.5 \\
+64--255 & 213 & 32.4 & 100.0 & 15.2 & 26.0 & 0.66 & 12.4 & 2 & 93.5 \\
+256+ & 477 & 44.9 & 100.0 & 36.9 & 43.6 & 0.86 & 3.9 & 3 & 98.2 \\
+\bottomrule
+\end{tabular}
+\caption{Graph colouring, learned prior, step 37{,}494, first 2000 training inputs. Unique-solution inputs: 7.47 distinct answers per input. Valid up to relabelling: 36.4\%. Held-out (876 inputs with more than 16 solutions): 90.0\% of valid samples unseen, uniform 89.7\% (16--63: 54.1 vs 52.4, 64--255: 85.5 vs 85.7, 256+: 98.3 vs 98.1); 23.71 distinct unseen per input; 98.3\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 99.4 & 100.0 & 36.5 & 49.9 & 0.76 & 46.2 & 1 & 94.5 \\
+1 & 649 & 99.9 & 100.0 & -- & -- & -- & -- & 1 & -- \\
+2--3 & 226 & 99.7 & 100.0 & 2.0 & 2.2 & 0.93 & 92.9 & 1 & 65.3 \\
+4--15 & 225 & 99.4 & 100.0 & 5.9 & 7.5 & 0.81 & 81.1 & 1 & 98.6 \\
+16--63 & 210 & 98.2 & 100.0 & 18.3 & 30.7 & 0.61 & 57.4 & 1 & 99.0 \\
+64--255 & 213 & 98.6 & 100.0 & 39.4 & 67.2 & 0.58 & 32.2 & 2 & 92.2 \\
+256+ & 477 & 99.5 & 100.0 & 73.9 & 93.2 & 0.79 & 9.0 & 3 & 97.0 \\
+\bottomrule
+\end{tabular}
+\caption{Graph colouring, $\mathcal{N}(0,I)$, first 2000 training inputs. Unique-solution inputs: 1.03 distinct answers per input. Valid up to relabelling: 99.4\%. Held-out (876 inputs with more than 16 solutions): 84.7\% of valid samples unseen, uniform 84.7\% (16--63: 50.0 vs 49.2, 64--255: 85.4 vs 86.0, 256+: 97.8 vs 97.8); 49.97 distinct unseen per input; 98.5\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 0.3 & 12.0 & 0.4 & 0.4 & 1.00 & 0.1 & 6 & 13.5 \\
+1 & 667 & 0.0 & 0.3 & -- & -- & -- & -- & 8 & -- \\
+2--3 & 267 & 0.0 & 0.0 & 0.0 & 0.0 & -- & 0.0 & 7 & 0.0 \\
+4--15 & 267 & 0.0 & 3.0 & 0.0 & 0.0 & -- & 0.3 & 6 & 2.5 \\
+16--63 & 267 & 0.0 & 4.1 & 0.0 & 0.0 & -- & 0.1 & 6 & 8.3 \\
+64--255 & 266 & 0.2 & 15.4 & 0.2 & 0.2 & 1.00 & 0.1 & 5 & 19.5 \\
+256+ & 266 & 1.9 & 67.3 & 1.9 & 1.9 & 1.00 & 0.1 & 5 & 37.8 \\
+\bottomrule
+\end{tabular}
+\caption{3-SAT, learned prior, test split. Unique-solution inputs: 99.93 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 0.4 & 12.9 & 0.6 & 0.7 & 0.90 & 0.5 & 6 & 22.0 \\
+1 & 667 & 0.0 & 0.1 & -- & -- & -- & -- & 7 & -- \\
+2--3 & 267 & 0.0 & 1.1 & 0.0 & 0.0 & 1.33 & 0.7 & 6 & 0.1 \\
+4--15 & 267 & 0.0 & 3.4 & 0.0 & 0.0 & 0.54 & 0.5 & 6 & 3.4 \\
+16--63 & 267 & 0.2 & 12.4 & 0.2 & 0.2 & 0.91 & 0.6 & 5 & 14.6 \\
+64--255 & 266 & 0.7 & 25.9 & 0.6 & 0.7 & 0.91 & 0.4 & 5 & 33.5 \\
+256+ & 266 & 2.5 & 53.8 & 2.0 & 2.5 & 0.89 & 0.2 & 5 & 59.7 \\
+\bottomrule
+\end{tabular}
+\caption{3-SAT, $\mathcal{N}(0,I)$, test split. Unique-solution inputs: 93.68 distinct answers per input.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 0.3 & 13.4 & 0.5 & 0.5 & 1.00 & 0.2 & 6 & 13.2 \\
+1 & 657 & 0.0 & 0.0 & -- & -- & -- & -- & 8 & -- \\
+2--3 & 269 & 0.0 & 0.4 & 0.0 & 0.0 & -- & 0.2 & 7 & 0.0 \\
+4--15 & 277 & 0.0 & 3.6 & 0.0 & 0.0 & -- & 0.5 & 6 & 1.6 \\
+16--63 & 274 & 0.1 & 5.1 & 0.1 & 0.1 & 1.02 & 0.2 & 6 & 8.9 \\
+64--255 & 248 & 0.2 & 18.1 & 0.2 & 0.2 & 1.00 & 0.1 & 5 & 15.6 \\
+256+ & 275 & 2.0 & 72.0 & 2.0 & 2.0 & 1.00 & 0.1 & 5 & 40.2 \\
+\bottomrule
+\end{tabular}
+\caption{3-SAT, learned prior, first 2000 training inputs. Unique-solution inputs: 99.93 distinct answers per input. Held-out (781 inputs with more than 16 solutions): 97.5\% of valid samples unseen, uniform 96.6\% (16--63: 46.7 vs 47.0, 64--255: 94.0 vs 88.4, 256+: 99.3 vs 98.8); 0.75 distinct unseen per input; 98.3\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lrcccccccc@{}}
+\toprule
+& & & Any-valid & \multicolumn{3}{c}{Distinct valid@100} & & \multicolumn{2}{c}{Invalid} \\
+\cmidrule(lr){5-7}\cmidrule(l){9-10}
+Solutions & Inputs & Validity & @100 & model & uniform & ratio & Coverage & cells off & blends \\
+\midrule
+all & 2000 & 0.7 & 14.6 & 0.8 & 1.0 & 0.89 & 0.5 & 6 & 21.8 \\
+1 & 657 & 0.0 & 0.3 & -- & -- & -- & -- & 7 & -- \\
+2--3 & 269 & 0.0 & 1.5 & 0.0 & 0.0 & -- & 0.6 & 7 & 0.1 \\
+4--15 & 277 & 0.1 & 4.3 & 0.1 & 0.1 & 0.90 & 0.7 & 6 & 2.7 \\
+16--63 & 274 & 0.2 & 7.7 & 0.2 & 0.2 & 0.86 & 0.4 & 5 & 14.2 \\
+64--255 & 248 & 0.8 & 31.5 & 0.7 & 0.8 & 0.92 & 0.5 & 5 & 32.5 \\
+256+ & 275 & 3.7 & 63.6 & 2.9 & 3.7 & 0.88 & 0.3 & 5 & 61.9 \\
+\bottomrule
+\end{tabular}
+\caption{3-SAT, $\mathcal{N}(0,I)$, first 2000 training inputs. Unique-solution inputs: 93.85 distinct answers per input. Held-out (781 inputs with more than 16 solutions): 96.5\% of valid samples unseen, uniform 95.4\% (16--63: 76.9 vs 64.3, 64--255: 94.7 vs 88.9, 256+: 97.9 vs 98.3); 1.27 distinct unseen per input; 97.3\% of unseen valid samples recombine stored ones.}
+\end{table}
+
+
+\clearpage
+
+\begin{thebibliography}{99}\small
+\bibitem{baek2026gram} J.~Baek, M.~Jo, M.~Kim, M.~Ren, Y.~Bengio, and S.~Ahn. Generative recursive reasoning.
+\emph{arXiv:2605.19376}, 2026.
+\bibitem{jolicoeur2025trm} A.~Jolicoeur-Martineau. Less is more: Recursive reasoning with tiny networks.
+\emph{arXiv:2510.04871}, 2025.
+\bibitem{nandwani2021oneofmany} Y.~Nandwani, D.~Jindal, Mausam, and P.~Singla. Neural learning of one-of-many
+solutions for combinatorial problems in structured output spaces. In \emph{ICLR}, 2021.
+\bibitem{bhattacharyya2018bestofmany} A.~Bhattacharyya, B.~Schiele, and M.~Fritz. Accurate and diverse sampling of
+sequences based on a ``best of many'' sample objective. In \emph{CVPR}, 2018.
+\bibitem{li2018imle} K.~Li and J.~Malik. Implicit maximum likelihood estimation. \emph{arXiv:1809.09087}, 2018.
+\end{thebibliography}
+
+\end{document}

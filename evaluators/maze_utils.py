@@ -94,6 +94,32 @@ class ShortestPaths:
         return label
 
 
+def _spread_np(mask: np.ndarray) -> np.ndarray:
+    """Cells 4-adjacent to any cell of mask, for a (B, n, n) numpy bool array."""
+    out = np.zeros_like(mask)
+    out[:, 1:] |= mask[:, :-1]
+    out[:, :-1] |= mask[:, 1:]
+    out[:, :, 1:] |= mask[:, :, :-1]
+    out[:, :, :-1] |= mask[:, :, 1:]
+    return out
+
+
+def path_order(grids: np.ndarray, path: np.ndarray) -> np.ndarray:
+    """Steps from start along each marked path, for (B, n, n) token grids and PATH masks; -1 off the path.
+
+    A shortest path is a simple chain, so flooding from start through its cells numbers them in order."""
+    order = np.where(grids == START, 0, -1)
+    frontier = reached = grids == START
+    step = 0
+    while True:
+        step += 1
+        frontier = _spread_np(frontier) & path & ~reached
+        if not frontier.any():
+            return order
+        order[frontier] = step
+        reached = reached | frontier
+
+
 def _spread(mask: torch.Tensor) -> torch.Tensor:
     """Cells 4-adjacent to any cell of mask."""
     out = torch.zeros_like(mask)

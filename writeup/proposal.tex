@@ -1,0 +1,88 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.7in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=1.2em}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\pagestyle{empty}
+
+\begin{document}
+
+\begin{center}
+{\large\bfseries Commit, Solve, Sample: Where Recursive Reasoners Fail on Problems with Many Answers}\\[2pt]
+Harshit Bisht \quad--- \quad Project proposal
+\end{center}
+
+\textbf{Problem.} Many reasoning problems have more than one correct answer. A good reasoner must (i) make all parts
+of its answer follow the \emph{same} solution, (ii) solve the problem, and (iii) produce other correct answers when
+asked again, which is what makes voting, best-of-$n$ and test-time scaling pay off. In LLMs these abilities are hard to
+separate because the set of correct answers is unknown. We study them where it is known exactly: tiny recursive
+reasoning models (TRM, in the line of HRM) on 10$\times$10 N-Queens and on 15$\times$15 mazes with 1 to 924 shortest
+paths, counted by dynamic programming. We compare deterministic TRMs trained naively or with one-of-many (1oML)
+objectives (MinLoss, I-ExplR) against GRAM, which adds a latent variable trained with a posterior and a KL weight
+$\beta$.
+
+\textbf{Evidence so far} (seed 42; \emph{one-sol}: inputs with a unique solution; \emph{coverage}: share of all
+solutions found by 100 samples on multi-solution inputs).
+\vspace{-3pt}
+\begin{center}\small
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+& Model and decoding & passes & 1 sample & one-sol & majority@100 & coverage \\
+\midrule
+\multirow{5}{*}{Mazes} & TRM naive, one shot & 1 & 37.2 & 97.6 & -- & 2.6 \\
+& TRM naive, commit and re-run every step & 15 & \textbf{99.4} & \textbf{98.5} & -- & -- \\
+& TRM + MinLoss (+ test-time noise and symmetries) & 1 & 94.0 & 85.3 & 97.5 & 8.4 / 54.1 \\
+& TRM + I-ExplR, one shot & 1 & 96.6 & 92.8 & -- & 8.6 \\
+& GRAM, $\beta=0.015$, 100k steps (+ symmetries) & 1 & 91.3 & 83.7 & \textbf{99.7} & \textbf{68.7} \\
+\midrule
+\multirow{4}{*}{N-Queens} & TRM naive: one shot / rows / commit and re-run & 1--9 & 1.0 / 66.7 / 77.9 & 62.7 & -- & -- \\
+& TRM + MinLoss + test-time noise and symmetries & 1 & \textbf{96.6} & 93.5 & 99.2 & 99.5 \\
+& GRAM & 1 & 91.0 & 82.8 & \textbf{100.0} & \textbf{99.9} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{-3pt}
+Naive TRM does not average the solutions, as usually assumed: in one pass it confidently follows different solutions
+in different rows (N-Queens) or abstains at forks (mazes), and it fixes its choice within the first two recursion
+steps. Our initial hypothesis, that GRAM's single $\beta$ forces a reliability--coverage trade-off fixable by a
+per-input KL budget, was refuted: training twice as long removed most of the trade-off, and the budget failed.
+
+\textbf{Hypotheses.}
+\begin{itemize}
+  \item[\textbf{D1}] \emph{(decoding)} Naive training learns the solutions and fails at decoding; committing one
+  decision at a time and re-running the model removes errors where solutions diverge.
+  \item[\textbf{D2}] \emph{(two kinds of error)} What remains are solver errors on unique-answer inputs; the training
+  objective moves these, in a domain-dependent direction (naive is the best solver on unique mazes, the worst on
+  unique N-Queens boards), and decoding cannot.
+  \item[\textbf{D3}] \emph{(diversity)} A deterministic model's tie-break is set by its initial latent state, so
+  perturbing that state and the input's symmetries at test time yields diversity without latent-variable training:
+  enough to match GRAM when inputs have few solutions, not when they have hundreds.
+\end{itemize}
+
+\textbf{Experiments and decision rules.}
+\textbf{E1} (D1): commit-and-re-run decoding for MinLoss, I-ExplR and GRAM; if they stay below naive TRM on mazes
+(99.4\%), decoding rather than the objective handles ambiguity, otherwise re-running also fixes solver errors.
+\textbf{E2} (D1): count, among naive N-Queens failures, boards whose rows each belong to some solution.
+\textbf{E3} (all): second seeds for naive decoding on both tasks and for GRAM at 100k steps; claims stand within
+5 points.
+\textbf{E4} (D3): the halting head as a verifier for picking among samples: on mazes it helps TRM (96.4\%
+$\to$ 99.3\%) and hurts GRAM (91.3\% $\to$ 76.7\%); check N-Queens.
+\textbf{E5}: a third task (Sudoku with several solutions) to test whether D1--D3 replicate.
+
+\textbf{Baselines and metrics.} Naive, Random and Unique TRM; TRM with MinLoss and I-ExplR; GRAM with the best KL
+weight (chosen on test: an optimistic bound). Metrics: single-sample accuracy by number of solutions; majority vote,
+verifier (any-valid) and halting-head selection against the number of samples; coverage; evenness against an exact
+uniform sampler; success on a hidden constraint met by only some solutions; and model passes, so that inference
+compute is compared fairly.
+
+\textbf{Expected outcome.} A decomposition of one-of-many failures into decoding, solving and sampling, with the
+inference-time fix for each, and a clear statement of what a latent variable adds beyond them.
+
+\end{document}

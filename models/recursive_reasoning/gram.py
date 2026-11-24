@@ -15,6 +15,8 @@ IGNORE_LABEL_ID = -100
 class GenerativeRecursiveReasoningModelInnerCarry:
     z_H: torch.Tensor
     z_L: torch.Tensor
+    eps: Optional[torch.Tensor] = None  # (B, latent_dim): the sample's latent when latent_scope="sample"
+    rate_exp: Optional[torch.Tensor] = None  # (B,): STRM's rate jitter exponent c (rates a^c), 1 outside training
 
 
 @dataclass
@@ -64,6 +66,31 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
     latent_dim: int = 256
     kl_coef: float = 0.1
     use_mlp_sampler: bool = False  # Use MLP for prior/posterior instead of linear projection
+    # Where training latents come from: "posterior" (GRAM: q(z|x, y), which sees the label) or "prior" (p(z|x), as at
+    # test time, so the label never reaches the latent; no KL term, pair with a best-of-K loss over rollouts)
+    train_latent: str = "posterior"
+    # Prior p(z|x): "learned" (mean and log-variance from h, as in GRAM) or "standard" (N(0, I), no parameters, so
+    # nothing can drift; z_proj still learns the noise covariance). With train_latent=prior this is IMLE-style noise.
+    prior_noise: str = "learned"
+    # Scope of one latent draw: "token" (GRAM: a new z for every position at every cycle) or "sample" (one z ~ N(0, I)
+    # per sample, shared by all positions and kept for all its cycles and supervision steps, so a single draw can pick
+    # one solution for the whole answer). "sample" needs train_latent=prior and prior_noise=standard
+    latent_scope: str = "token"
+
+    # Recursion: "trm" (TRM's two states, as in GRAM) or "strm" (STRM, Glass et al. 2026, arXiv 2611.23677: one state s
+    # whose channels are moving averages with fixed log-spaced rates, s <- (1 - a) s + a f(RMSNorm(s) + x), called
+    # H_cycles * (L_cycles + 1) times per supervision step, the last L_cycles + 1 with gradient; heads read only the slow
+    # half of the channels). STRM supports posterior-free training only, with latent_scope "none" or "sample" (the
+    # sample latent is added to the input injection at every call)
+    recursion: str = "trm"
+    strm_min_rate: float = 1 / 13  # rate of the slowest channel (a_min); heads read channels with rate <= sqrt(a_min)
+    strm_rate_jitter: float = 1.5  # training only: per sample, rates become a^c with c = J^u, u ~ U[-1, 1]
+    # Start state of a sample: "fixed" (one random vector for all samples and positions, as in STRM) or "sample" (a new
+    # N(0, I) vector per sample, shared by its positions), which makes the start state a sample-level random choice
+    strm_init: str = "fixed"
+    # Training only: N(0, train_state_noise^2) noise on the high-level state after each intermediate cycle, the same
+    # noise sample_predictions.py --state_noise adds at test time, so the model learns to answer from noisy states
+    train_state_noise: float = 0.0
 
     # Variational sampling control (for ablation)
     fix_mu: bool = False  # If True, force mu = 0 (both prior and posterior)
@@ -85,9 +112,11 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
 class VariationalLayer(nn.Module):
     """Variational layer with optional MLP encoders"""
     def __init__(self, hidden_size: int, latent_dim: int, vocab_size: int, use_mlp: bool = False, expansion: float = 2.0,
-                 fix_mu: bool = False, fix_std: bool = False, posterior_y_dim: int = None):
+                 fix_mu: bool = False, fix_std: bool = False, posterior_y_dim: int = None, standard_prior: bool = False):
         super().__init__()
         self.use_mlp = use_mlp
+        self.latent_dim = latent_dim
+        self.standard_prior = standard_prior
         self.fix_mu = fix_mu
         self.fix_std = fix_std
         # posterior_y_dim: dimension of y input for posterior (default: vocab_size, or hidden_size for patchify)
@@ -123,7 +152,9 @@ class VariationalLayer(nn.Module):
         B, N, D = x.shape
         h = x.reshape(B * N, D).to(torch.float32)  # (B*N, D)
 
-        if self.use_mlp:
+        if self.standard_prior:
+            mu = logvar = torch.zeros(B * N, self.latent_dim, dtype=torch.float32, device=x.device)  # N(0, I)
+        elif self.use_mlp:
             mlp_out = self.prior_mlp(h)  # (B*N, 2*latent_dim)
             mu, logvar = mlp_out.chunk(2, dim=-1)  # Each (B*N, latent_dim)
         else:
@@ -280,8 +311,15 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
             use_mlp=self.config.use_mlp_sampler,
             fix_mu=self.config.fix_mu,
             fix_std=self.config.fix_std,
-            posterior_y_dim=posterior_y_dim
+            posterior_y_dim=posterior_y_dim,
+            standard_prior=self.config.prior_noise == "standard",
         )
+        # Sampling-time options, set by sample_predictions.py and not part of the config (checkpoints are unaffected).
+        # eval_latent="posterior" draws z from q(z | x, y) with y = batch["labels"] instead of the prior, outside
+        # training too. state_noise adds N(0, state_noise^2) noise to the high-level state after each intermediate
+        # cycle, as test-time noise (PTRM) does
+        self.eval_latent = "prior"
+        self.state_noise = 0.0
 
         self.puzzle_emb_len = -(self.config.puzzle_emb_ndim // -self.config.hidden_size)  if self.config.puzzle_emb_len == 0 else self.config.puzzle_emb_len  # ceil div
         if self.config.puzzle_emb_ndim > 0:
@@ -314,6 +352,22 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         with torch.no_grad():
             self.q_head.weight.zero_()
             self.q_head.bias.fill_(-5)  # type: ignore
+
+        if self.config.recursion == "strm":
+            # Log-spaced rates from 1 (fastest channel) to a_min; the heads read the slow channels, rate <= sqrt(a_min)
+            D = self.config.hidden_size
+            rates = self.config.strm_min_rate ** (torch.arange(D, dtype=torch.float32) / (D - 1))
+            self.strm_rates = nn.Buffer(rates, persistent=False)
+            self.strm_slow = nn.Buffer(torch.nonzero(rates <= self.config.strm_min_rate ** 0.5 + 1e-7).squeeze(-1), persistent=False)
+            n_slow = self.strm_slow.numel()
+            if self.config.use_mlp_lm_head:
+                self.lm_head = SwiGLU(n_slow, self.config.expansion, out_dim=self.config.vocab_size)
+            else:
+                self.lm_head = CastedLinear(n_slow, self.config.vocab_size, bias=False)
+            self.q_head = CastedLinear(n_slow, 2, bias=True)
+            with torch.no_grad():
+                self.q_head.weight.zero_()
+                self.q_head.bias.fill_(-5)  # type: ignore
 
     def _patchify(self, x: torch.Tensor) -> torch.Tensor:
         """Patchify image: (B, C, H, W) -> (B, num_patches, patch_size*patch_size*C)"""
@@ -394,20 +448,85 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         # Detach to prevent gradient flow through input encoder when processing posterior labels
         return y_emb.to(self.forward_dtype)
 
+    def _use_posterior(self):
+        """Whether z comes from the posterior: in training if train_latent says so, otherwise if eval_latent does."""
+        if self.training:
+            return self.config.train_latent == "posterior"
+        return self.eval_latent == "posterior"
+
     def empty_carry(self, batch_size: int):
         seq_len = self.num_patches if self.config.use_patchify else self.config.seq_len
+        sample_scope = self.config.latent_scope == "sample"
+        strm = self.config.recursion == "strm"
         return GenerativeRecursiveReasoningModelInnerCarry(
-            z_H=torch.empty(batch_size, seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
+            # STRM keeps its state in float32: its slow channels move by as little as a_min per call
+            z_H=torch.empty(batch_size, seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=torch.float32 if strm else self.forward_dtype),
             z_L=torch.empty(batch_size, seq_len + self.puzzle_emb_len, self.config.hidden_size, dtype=self.forward_dtype),
-        )
-        
-    def reset_carry(self, reset_flag: torch.Tensor, carry: GenerativeRecursiveReasoningModelInnerCarry):
-        return GenerativeRecursiveReasoningModelInnerCarry(
-            z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
-            z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
+            eps=torch.empty(batch_size, self.config.latent_dim, dtype=torch.float32) if sample_scope else None,
+            rate_exp=torch.empty(batch_size, dtype=torch.float32) if strm else None,
         )
 
+    def reset_carry(self, reset_flag: torch.Tensor, carry: GenerativeRecursiveReasoningModelInnerCarry):
+        # A sequence that starts a new sample also draws its sample latent
+        eps = None if carry.eps is None else torch.where(reset_flag.view(-1, 1), torch.randn_like(carry.eps), carry.eps)
+        rate_exp = None
+        if carry.rate_exp is not None:
+            jitter = self.config.strm_rate_jitter ** (2 * torch.rand_like(carry.rate_exp) - 1) if self.training else torch.ones_like(carry.rate_exp)
+            rate_exp = torch.where(reset_flag, jitter, carry.rate_exp)
+        if self.config.recursion == "strm" and self.config.strm_init == "sample":
+            start = torch.randn_like(carry.z_H[:, :1])  # one vector per sample, shared by its positions
+        else:
+            start = self.H_init
+        return GenerativeRecursiveReasoningModelInnerCarry(
+            z_H=torch.where(reset_flag.view(-1, 1, 1), start, carry.z_H).to(carry.z_H.dtype),
+            z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
+            eps=eps,
+            rate_exp=rate_exp,
+        )
+
+    def _strm_forward(self, carry: GenerativeRecursiveReasoningModelInnerCarry, batch: Dict[str, torch.Tensor]):
+        """One supervision step of STRM: K = H_cycles * (L_cycles + 1) calls of the shared network on one state."""
+        seq_info = dict(cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None)
+        x = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        if carry.eps is not None:
+            x = x + self.variational.z_proj(carry.eps)[:, None, :].to(self.forward_dtype)
+        rates = (self.strm_rates[None, :] ** carry.rate_exp[:, None])[:, None, :]  # (B, 1, D)
+
+        def call(s):
+            out = self.L_level(rms_norm(s, variance_epsilon=self.config.rms_norm_eps).to(self.forward_dtype), x, **seq_info)
+            return (1 - rates) * s + rates * out.to(torch.float32)
+
+        grad_calls = self.config.L_cycles + 1
+        noise = self.config.train_state_noise if self.training else self.state_noise
+        s = carry.z_H
+        with torch.no_grad():
+            for i in range(self.config.H_cycles * grad_calls - grad_calls):
+                s = call(s)
+                # State noise after each intermediate cycle, as on the trm path
+                if noise > 0 and (i + 1) % grad_calls == 0:
+                    s = s + noise * torch.randn_like(s)
+        for _ in range(grad_calls):
+            s = call(s)
+
+        # Heads read the RMS-normalised slow channels
+        r = rms_norm(s[..., self.strm_slow], variance_epsilon=self.config.rms_norm_eps).to(self.forward_dtype)
+        output = self.lm_head(r[:, self.puzzle_emb_len:])
+        q_logits = self.q_head(r[:, 0]).to(torch.float32)
+        new_carry = GenerativeRecursiveReasoningModelInnerCarry(z_H=s.detach(), z_L=carry.z_L, eps=carry.eps, rate_exp=carry.rate_exp)
+        return new_carry, output, (q_logits[..., 0], q_logits[..., 1]), {}, None
+
+    def _prior_latent(self, h: torch.Tensor, carry: GenerativeRecursiveReasoningModelInnerCarry):
+        """z, mu, logvar from the prior: per position from p(z | h), or the sample's own latent copied to every position."""
+        if carry.eps is None:
+            return self.variational.sample_prior(h)
+        B, N, _ = h.shape
+        z = carry.eps[:, None, :].expand(B, N, -1)
+        zeros = torch.zeros_like(z)
+        return z, zeros, zeros
+
     def forward(self, carry: GenerativeRecursiveReasoningModelInnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[GenerativeRecursiveReasoningModelInnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if self.config.recursion == "strm":
+            return self._strm_forward(carry, batch)
         seq_info = dict(
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
         )
@@ -417,6 +536,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
 
         # Forward iterations
         z_H, z_L = carry.z_H, carry.z_L
+        noise = self.config.train_state_noise if self.training else self.state_noise
         # H_cycles-1 without grad
         with torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
@@ -428,20 +548,22 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                 puzzle_emb = z_H[:, :self.puzzle_emb_len]
                 h_t = z_H[:, self.puzzle_emb_len:]
 
-                if self.training:
+                if self._use_posterior():
                     if self.config.use_patchify:
                         y_tar = self._get_label_embedding(batch["labels"])
                     else:
-                        y_tar = F.one_hot(batch["labels"].long(), num_classes=self.config.vocab_size).to(torch.float32)
+                        y_tar = F.one_hot(batch["labels"].long().clamp_min(0), num_classes=self.config.vocab_size).to(torch.float32)  # Ignored labels (-100) read as token 0
                     z, _, _ = self.variational.sample_posterior(h_t, y_tar)
                 else:
-                    z, _, _ = self.variational.sample_prior(h_t)
+                    z, _, _ = self._prior_latent(h_t, carry)
                 # Decode: condition h_t on z (per-token z)
                 B, N, _ = z.shape
                 z_flat = z.reshape(B * N, -1)  # (B*N, latent_dim)
                 z_proj_flat = self.variational.z_proj(z_flat)  # (B*N, hidden_size)
                 z = z_proj_flat.reshape(B, N, -1).to(self.forward_dtype)  # (B, N, D)
                 h_t_conditioned = h_t + z
+                if noise > 0:
+                    h_t_conditioned = h_t_conditioned + noise * torch.randn_like(h_t_conditioned)
                 z_H = torch.cat([puzzle_emb, h_t_conditioned], dim=1)
 
         # 1 with grad
@@ -455,16 +577,16 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         sample_in = h_T
         # Variational sampling
         vae_outputs = {}
-        z_pred, prior_mu, prior_logvar = self.variational.sample_prior(sample_in)
+        z_pred, prior_mu, prior_logvar = self._prior_latent(sample_in, carry)
         vae_outputs['prior_mu'] = prior_mu
         vae_outputs['prior_logvar'] = prior_logvar
 
-        if self.training:
+        if self._use_posterior():
             # Sample from posterior q(z|h_T, y_tar)
             if self.config.use_patchify:
                 y_tar = self._get_label_embedding(batch["labels"])
             else:
-                y_tar = F.one_hot(batch["labels"].long(), num_classes=self.config.vocab_size).to(torch.float32)
+                y_tar = F.one_hot(batch["labels"].long().clamp_min(0), num_classes=self.config.vocab_size).to(torch.float32)  # Ignored labels (-100) read as token 0
             z_post, post_mu, post_logvar = self.variational.sample_posterior(sample_in, y_tar)
             vae_outputs['post_mu'] = post_mu
             vae_outputs['post_logvar'] = post_logvar
@@ -481,7 +603,7 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
 
         # LM Outputs
         z_H_conditioned = torch.cat([puzzle_emb, h_T_conditioned], dim=1)
-        new_carry = GenerativeRecursiveReasoningModelInnerCarry(z_H=z_H_conditioned.detach(), z_L=z_L.detach())
+        new_carry = GenerativeRecursiveReasoningModelInnerCarry(z_H=z_H_conditioned.detach(), z_L=z_L.detach(), eps=carry.eps)
         if self.config.use_patchify:
             # (B, num_patches, hidden) -> (B, num_patches, p*p*C*vocab) -> (B, C, H, W, vocab) -> (B, seq, vocab)
             patch_logits = self.patch_out(h_T_conditioned)
@@ -506,6 +628,18 @@ class GenerativeRecursiveReasoningModel(nn.Module):
     def __init__(self, config_dict: dict):
         super().__init__()
         self.config = GenerativeRecursiveReasoningModelConfig(**config_dict)
+        assert self.config.train_latent in ("posterior", "prior"), f"train_latent must be posterior or prior, got {self.config.train_latent}"
+        assert self.config.prior_noise in ("learned", "standard"), f"prior_noise must be learned or standard, got {self.config.prior_noise}"
+        assert self.config.latent_scope in ("token", "sample", "none"), f"latent_scope must be token, sample or none, got {self.config.latent_scope}"
+        assert self.config.latent_scope == "token" or (self.config.train_latent == "prior" and self.config.prior_noise == "standard"), \
+            "latent_scope=sample or none needs train_latent=prior and prior_noise=standard"
+        assert self.config.recursion in ("trm", "strm"), f"recursion must be trm or strm, got {self.config.recursion}"
+        assert self.config.strm_init in ("fixed", "sample"), f"strm_init must be fixed or sample, got {self.config.strm_init}"
+        if self.config.recursion == "strm":
+            assert self.config.latent_scope in ("none", "sample"), "strm supports latent_scope none or sample"
+            assert not (self.config.use_patchify or self.config.use_value_head), "strm does not support patchify or the value head"
+        else:
+            assert self.config.latent_scope != "none", "latent_scope=none is for recursion=strm"
         print("Initializing GRAM with config:", self.config)
         self.inner = GenerativeRecursiveReasoningModelInner(self.config)
 

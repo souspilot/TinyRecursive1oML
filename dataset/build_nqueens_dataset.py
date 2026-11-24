@@ -42,6 +42,10 @@ class DataProcessConfig(BaseModel):
     multi_sol_ratio: Optional[float] = None
     one_of_many: bool = False  # One row per input with every solution in label_set
     train_unique_only: bool = False  # Keep only single-solution inputs in train (1oML "Unique" baseline)
+    # Train on at most this many solutions per input (drawn at random, the same in every variant built with the
+    # same seed); the rest are held out, so sampling on training inputs tests for solutions never seen. num_solutions
+    # keeps the exact count, and the test split is unaffected
+    max_stored_solutions: Optional[int] = None
 
 
 def generate_nqueens_solutions(n: int) -> List[np.ndarray]:
@@ -304,17 +308,33 @@ def build_nqueens_dataset(config: DataProcessConfig):
     
     test_input_keys = set(input_keys[:test_size])
     train_input_keys = set(input_keys[test_size:])
-    
-    train_data = [item for key in train_input_keys for item in input_groups[key]]
-    test_data = [item for key in test_input_keys for item in input_groups[key]]
+
+    if config.max_stored_solutions is not None:
+        # Its own generator, so the rest of the build draws exactly as without a cap
+        stored_rng = np.random.default_rng(config.seed + 1)
+        held_out = 0
+        for key in input_keys[test_size:]:
+            items = input_groups[key]
+            labels = sorted({label_board.tobytes() for _, label_board, _ in items})
+            if len(labels) > config.max_stored_solutions:
+                keep = {labels[i] for i in stored_rng.choice(len(labels), config.max_stored_solutions, replace=False)}
+                input_groups[key] = [item for item in items if item[1].tobytes() in keep]
+                held_out += 1
+        print(f"Train inputs with more than {config.max_stored_solutions} solutions (the rest held out): {held_out}")
+
+    # In the shuffled order, not set order, which changes from run to run (bytes hashing is randomised)
+    train_data = [item for key in input_keys[test_size:] for item in input_groups[key]]
+    test_data = [item for key in input_keys[:test_size] for item in input_groups[key]]
     
     print(f"Train inputs: {len(train_input_keys)} ({len(train_data)} examples)")
     print(f"Test inputs: {len(test_input_keys)} ({len(test_data)} examples)")
     
-    create_split("train", train_data, config.n, config.output_dir, config.multi_sol_ratio,
-                 one_of_many=config.one_of_many, unique_only=config.train_unique_only)
+    # Test first: create_split draws from the global generator, so this keeps the test split the same whatever
+    # the train options (--max-stored-solutions, --train-unique-only)
     create_split("test", test_data, config.n, config.output_dir, config.multi_sol_ratio,
                  one_of_many=config.one_of_many)
+    create_split("train", train_data, config.n, config.output_dir, config.multi_sol_ratio,
+                 one_of_many=config.one_of_many, unique_only=config.train_unique_only)
     
     # Save identifiers mapping
     with open(os.path.join(config.output_dir, "identifiers.json"), "w") as f:

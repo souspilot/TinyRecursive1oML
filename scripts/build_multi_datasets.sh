@@ -1,0 +1,49 @@
+#!/bin/bash
+# Build the four multi-solution datasets of the project (see scripts/multi_compare.sh), skipping any that exist.
+# Every dataset stores at most 16 solutions per training input and keeps the exact count, so inputs with more
+# solutions have held-out ones (for testing whether a model produces solutions it never saw).
+#
+#   maze      15x15 mazes, 1 to 924 shortest paths          (dataset/build_maze_dataset.py)
+#   nqueens   10x10 N-Queens, 1 to 3 queens given           (dataset/build_nqueens_dataset.py, capped at 16)
+#   sudoku    9x9 Sudoku, 26 to 50 clues, up to 1024 sols    (dataset/build_sudoku_multi_dataset.py)
+#   graph     3-colouring of 10-node graphs, 1 to 9842 sols  (dataset/build_graph_coloring_multi_dataset.py)
+#   heyawake  10x10 heyawake from Pencil Puzzle Bench, 1 to 1023 sols  (dataset/build_heyawake_multi_dataset.py)
+#   nurikabe  10x10 nurikabe from Pencil Puzzle Bench, 1 to 1023 sols  (dataset/build_nurikabe_multi_dataset.py)
+#   lightup   10x10 light up from Pencil Puzzle Bench, 1 to 1023 sols  (dataset/build_lightup_multi_dataset.py)
+#             The Pencil Puzzle Bench sets have their own validation split and are not in the default list: they
+#             need clingo and PPBENCH_SOURCE=<path to the benchmark's full_dataset.jsonl>
+#
+# Each also gets a validation split (dataset/build_validation_split.py), for choosing beta and reading training curves.
+#
+# Usage: bash scripts/build_multi_datasets.sh [dataset ...]     (default: all four; CPU only, uses every core)
+set -e
+cd "$(dirname "$0")/.."
+datasets=${*:-maze nqueens sudoku graph}
+
+built() { [ -f "$1/test/dataset.json" ] && echo "$1 exists, skipping"; }
+
+for d in ${datasets}; do
+  case $d in
+    maze)
+      built data/maze-multi-1oml || python dataset/build_maze_dataset.py --size 15 --num-train 100000 --num-test 2000 --output-dir data/maze-multi ;;
+    nqueens)
+      # Two builds with the same seed share the split and the stored solutions
+      base=data/nqueens-multi
+      built ${base} || python dataset/build_nqueens_dataset.py --n 10 --remove-counts 7 8 9 --max-stored-solutions 16 --output-dir ${base}
+      built ${base}-1oml || python dataset/build_nqueens_dataset.py --n 10 --remove-counts 7 8 9 --max-stored-solutions 16 --output-dir ${base}-1oml --one-of-many ;;
+    sudoku)
+      built data/sudoku-multi-1oml || python dataset/build_sudoku_multi_dataset.py --num-train 100000 --num-test 2000 --output-dir data/sudoku-multi ;;
+    graph)
+      built data/graph-coloring-multi-1oml || python dataset/build_graph_coloring_multi_dataset.py --num-train 100000 --num-test 2000 --output-dir data/graph-coloring-multi ;;
+    heyawake)
+      built data/heyawake-multi-1oml || python dataset/build_heyawake_multi_dataset.py --source "${PPBENCH_SOURCE:?set PPBENCH_SOURCE}" --num-train 100000 --num-test 2000 --output-dir data/heyawake-multi ;;
+    nurikabe)
+      built data/nurikabe-multi-1oml || python dataset/build_nurikabe_multi_dataset.py --source "${PPBENCH_SOURCE:?set PPBENCH_SOURCE}" --num-train 100000 --num-test 2000 --output-dir data/nurikabe-multi ;;
+    lightup)
+      built data/lightup-multi-1oml || python dataset/build_lightup_multi_dataset.py --source "${PPBENCH_SOURCE:?set PPBENCH_SOURCE}" --num-train 100000 --num-test 2000 --output-dir data/lightup-multi ;;
+    *) echo "Unknown dataset: $d (maze, nqueens, sudoku, graph, heyawake, nurikabe, lightup)"; exit 1 ;;
+  esac
+done
+others=$(echo ${datasets} | tr ' ' '\n' | grep -vE '^(heyawake|nurikabe|lightup)$' | tr '\n' ' ')
+[ -z "${others// }" ] || python dataset/build_validation_split.py ${others}
+echo "Done: ${datasets}"

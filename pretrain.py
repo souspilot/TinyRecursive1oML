@@ -304,11 +304,7 @@ def load_checkpoint(model: nn.Module, config: PretrainConfig):
                 state_dict[puzzle_emb_name] = (
                     torch.mean(puzzle_emb, dim=0, keepdim=True).expand(expected_shape).contiguous()
                 )
-        # A SelectR run may start from a MinLoss checkpoint, which has no selector weights yet
-        missing, unexpected = model.load_state_dict(state_dict, assign=True, strict=False)
-        missing = [k for k in missing if ".selector." not in k]
-        if missing or unexpected:
-            raise RuntimeError(f"Checkpoint mismatch. Missing keys: {missing}. Unexpected keys: {unexpected}")
+        model.load_state_dict(state_dict, assign=True)
 
 
 def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
@@ -676,8 +672,7 @@ def launch(hydra_config: DictConfig):
             checkpoint = torch.load(config.load_checkpoint, map_location="cuda", weights_only=False)
             if 'ema' in checkpoint:
                 print('  ✓ Loading EMA state from checkpoint')
-                # Keep freshly registered entries (e.g. a new selector) the checkpoint lacks
-                ema_helper.load_state_dict({**ema_helper.state_dict(), **checkpoint['ema']})
+                ema_helper.load_state_dict(checkpoint['ema'])
 
     # Resume: the model and EMA weights are loaded above; also restore the optimizer and step, and
     # continue from the next eval interval with the data order the original run would have used
@@ -688,14 +683,7 @@ def launch(hydra_config: DictConfig):
         for optim, optim_state in zip(train_state.optimizers, checkpoint['optimizer']):
             optim.load_state_dict(optim_state)
         train_state.step = checkpoint['step']
-        if 'iters_done' in checkpoint:
-            start_iter = checkpoint['iters_done']
-        else:
-            # Older checkpoints: every eval interval is the same number of steps (one example per group)
-            steps_per_iter = train_epochs_per_iter * train_metadata.total_groups // (config.global_batch_size // config.rollouts)
-            if train_state.step % steps_per_iter != 0:
-                raise ValueError(f"Can't tell which eval interval step {train_state.step} ends ({steps_per_iter} steps each)")
-            start_iter = train_state.step // steps_per_iter
+        start_iter = checkpoint['iters_done']
         train_state.iters_done = start_iter
         train_loader.dataset._iters = start_iter  # type: ignore
         print(f"Resuming at step {train_state.step}, epoch {start_iter * train_epochs_per_iter} of {config.epochs}")
