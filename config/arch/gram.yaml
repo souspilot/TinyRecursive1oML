@@ -47,6 +47,7 @@ strm_min_rate: 0.07692307692307693 # STRM: rate of the slowest channel (1/13); h
 strm_rate_jitter: 1.5 # STRM, training only: rates a^c per sample, c = J^u, u ~ U[-1, 1]
 strm_init: fixed # STRM start state: fixed (one random vector, as in STRM) or sample (new N(0, I) vector per sample)
 train_state_noise: 0.0 # training only: N(0, s^2) noise on the high-level state after each intermediate cycle (test-time noise is --state_noise)
+grad_all_transitions: False # training only: gradient through every transition of a supervision step, not just the last
 fix_mu: False # if True, force mu = 0 for both prior and posterior (ablation)
 fix_std: False # if True, force std = 0 for both prior and posterior, deterministic (ablation)
 

@@ -19,6 +19,8 @@
 #   gram_std_balanced The same, but every rollout trains, and the rollouts are spread over the stored solutions: each
 #                     solution takes at most ceil(ROLLOUTS / stored) rollouts, closest pairs first. A rollout sent to
 #                     a solution other than its own closest has weight FORCED_WEIGHT (default 0.3; run name _fw<w>)
+#                     FULL_GRAD=1 (these three) keeps the gradient through every transition of a supervision step,
+#                     so the earlier stochastic guidance is trained too (run name _fullgrad; ~3x activation memory)
 #   strm_bestofk      The same best-of-K training on STRM's recursion (Glass et al. 2026): one state whose channels are
 #                     moving averages at fixed rates, heads on the slow channels. Randomness comes from STRM_INIT=sample
 #                     (default: a new random start state per sample) and/or LATENT_SCOPE=sample (default none: an N(0, I)
@@ -56,8 +58,8 @@ case $method in
   gram_std_bestofk|gram_std_nearest|gram_std_balanced)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}
-    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=${method#gram_std_} +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}${TRAIN_NOISE:+ arch.train_state_noise=${TRAIN_NOISE}}${FORCED_WEIGHT:+ arch.loss.forced_weight=${FORCED_WEIGHT}}"
-    run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${TRAIN_NOISE:+_tn${TRAIN_NOISE}}${FORCED_WEIGHT:+_fw${FORCED_WEIGHT}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
+    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=${method#gram_std_} +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}${TRAIN_NOISE:+ arch.train_state_noise=${TRAIN_NOISE}}${FORCED_WEIGHT:+ arch.loss.forced_weight=${FORCED_WEIGHT}}${FULL_GRAD:+ arch.grad_all_transitions=True}"
+    run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${TRAIN_NOISE:+_tn${TRAIN_NOISE}}${FORCED_WEIGHT:+_fw${FORCED_WEIGHT}}${FULL_GRAD:+_fullgrad}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
   strm_bestofk)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}

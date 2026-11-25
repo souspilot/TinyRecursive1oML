@@ -1,5 +1,6 @@
 from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass
+import contextlib
 import math
 import torch
 import torch.nn.functional as F
@@ -91,6 +92,9 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
     # Training only: N(0, train_state_noise^2) noise on the high-level state after each intermediate cycle, the same
     # noise sample_predictions.py --state_noise adds at test time, so the model learns to answer from noisy states
     train_state_noise: float = 0.0
+    # Training only: keep the gradient through every transition of a supervision step, not just the last, so the
+    # stochastic guidance added in the earlier transitions is on the gradient path (about 3x the activation memory)
+    grad_all_transitions: bool = False
 
     # Variational sampling control (for ablation)
     fix_mu: bool = False  # If True, force mu = 0 (both prior and posterior)
@@ -537,8 +541,9 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         # Forward iterations
         z_H, z_L = carry.z_H, carry.z_L
         noise = self.config.train_state_noise if self.training else self.state_noise
-        # H_cycles-1 without grad
-        with torch.no_grad():
+        # H_cycles-1 without grad (with grad if grad_all_transitions, in training)
+        full_grad = self.config.grad_all_transitions and self.training
+        with contextlib.nullcontext() if full_grad else torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
                 for _L_step in range(self.config.L_cycles):
                     z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
