@@ -182,6 +182,42 @@ methods. At the reference $\beta$: maze 0.84 (GRAM) and 0.14 (\bok), N-Queens 1.
 graph colouring 0.96 and 0.81, heyawake 0.95 (GRAM). On mazes GRAM's 0.84 reflects its few valid samples, not
 diversity: its distinct@100 is 0.8 against the baseline's 2.2.
 
+\section{Training every rollout (Sudoku)}
+
+\Bok{} trains only the rollout closest to a stored solution. Two objectives train all $K=8$ rollouts instead:
+\emph{nearest} trains each rollout towards its own closest stored solution; \emph{balanced} gives each stored solution
+at most $\lceil 8/\text{stored}\rceil$ rollouts, assigned closest pairs first, and a rollout sent to a solution other
+than its own closest has weight 0.3. Predictions: nearest $\ge$99 / under 5 distinct@100; balanced $\ge$98 / 15--30.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Objective & $\sigma=0$ (run summary) & $\sigma=0.5$ & $\sigma=1$ \\
+\midrule
+\Bok{} & 99.2 / 99.3 / 10.4 & 99.5 / 27.7 & 97.5 / 29.1 \\
+Nearest & 99.3 / 100.0 / 4.6 & 98.1 / 23.3 & 77.1 / 17.1 \\
+Balanced & 99.2 / 99.8 / 3.3 & 99.1 / 16.8 & 90.0 / 23.5 \\
+MinLoss ($K=1$) & 99.5 / 99.8 / 2.5 & 99.4 / 18.0 & \\
+\bottomrule
+\end{tabular}
+\caption{Validity / unique-solution validity / distinct@100 ($\sigma>0$: validity / distinct@100, final checkpoint).}
+\end{table}
+
+Training every rollout lowers diversity, to MinLoss's level, whichever way targets are assigned. Balanced kept about
+half its rollouts on a solution other than their own closest to the end of training (forced share 0.49), yet its
+answers did not spread: the network could not tell from a rollout's stochastic guidance which solution it was being
+sent to, so the best it could do was ignore the guidance. This suggests that \bok{}'s diversity comes from the
+rollouts it leaves untrained, not from a learned link between stochastic guidance and solutions. The only
+stochastic guidance on the gradient path is drawn per position just before the output head, where a per-position
+choice cannot pick a whole solution; GRAM's posterior creates that link by drawing the guidance from the target.
+
+\section{MinLoss with state noise}
+
+Validity / distinct@100, final checkpoint: heyawake $\sigma=0.5$ 95.3 / 2.4, $\sigma=1$ 94.7 / 3.5 (without: 96.2 /
+1.3); nurikabe 88.7 / 2.4 and 87.1 / 3.7 (without: 89.1 / 1.2). State noise gives MinLoss little diversity on the
+human-made tasks, unlike Sudoku (2.5 to 18.0).
+
 \section{Random 3-SAT}
 
 A benchmark of random 3-SAT formulas over 16 variables (clause density $U[1,4.5]$, up to a quarter of the variables
