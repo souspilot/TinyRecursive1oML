@@ -131,6 +131,16 @@ class ACTLossHead(nn.Module):
         if self.training and self.rollouts > 1:
             new_carry.halted = new_carry.halted.view(-1, self.rollouts).all(-1).repeat_interleave(self.rollouts)
 
+        # Hybrid GRAM: prior-latent rows train towards their closest stored solution (MinLoss); the KL term skips them
+        prior_rows = outputs.get("prior_rows")
+        if prior_rows is not None:
+            with torch.no_grad():
+                label_set = new_carry.current_data["label_set"]
+                target_losses, _, target_valid = self.target_set_losses(outputs["logits"].detach(), label_set)
+                nearest = torch.where(target_valid, target_losses, torch.inf).argmin(-1)
+                nearest_labels = torch.gather(label_set, 1, nearest.view(-1, 1, 1).expand(-1, 1, label_set.shape[-1])).squeeze(1)
+                labels = torch.where(prior_rows.view(-1, 1), nearest_labels.to(labels.dtype), labels)
+
         # Best-of-K: each rollout's closest stored solution, then only the best rollout of each example trains
         target_weights = None
         forced_share = None
@@ -260,11 +270,14 @@ class ACTLossHead(nn.Module):
                 metrics["kl_loss"] = kl_loss.detach()
             else:
                 def compute_kl(post_mu, post_logvar, prior_mu, prior_logvar):
-                    return torch.sum(0.5 * (
+                    kl = 0.5 * (
                         prior_logvar - post_logvar - 1
                         + torch.exp(post_logvar - prior_logvar)
                         + ((post_mu - prior_mu) ** 2) / torch.exp(prior_logvar)
-                    ))
+                    )
+                    if prior_rows is not None:  # hybrid: no KL on rows that used the prior's latent
+                        kl = kl * (~prior_rows).view((-1,) + (1,) * (kl.ndim - 1)).to(kl.dtype)
+                    return torch.sum(kl)
 
                 if self.kl_balance_alpha is not None:
                     # KL balancing: alpha * KL(sg(post) || prior) + (1-alpha) * KL(post || sg(prior))

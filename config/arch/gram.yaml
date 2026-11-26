@@ -48,6 +48,8 @@ strm_rate_jitter: 1.5 # STRM, training only: rates a^c per sample, c = J^u, u ~ 
 strm_init: fixed # STRM start state: fixed (one random vector, as in STRM) or sample (new N(0, I) vector per sample)
 train_state_noise: 0.0 # training only: N(0, s^2) noise on the high-level state after each intermediate cycle (test-time noise is --state_noise)
 grad_all_transitions: False # training only: gradient through every transition of a supervision step, not just the last
+hybrid: False # training only: a prior_rows share of rows use the prior's latent and MinLoss (see gram.py)
+prior_rows: 0.25
 fix_mu: False # if True, force mu = 0 for both prior and posterior (ablation)
 fix_std: False # if True, force std = 0 for both prior and posterior, deterministic (ablation)
 
