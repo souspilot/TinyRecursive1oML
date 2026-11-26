@@ -10,6 +10,8 @@
 #                     N-Queens 0.045, graph 0.45, Sudoku 0.05. They have no maze setup. In all of theirs beta x the
 #                     number of labelled cells is 4.0-4.5 (cross-entropy is averaged over cells, the KL summed), so
 #                     maze, with 225 labelled cells, gets 4.5 / 225 = 0.02
+#                     PRIOR_NOISE=standard fixes the prior to N(0, I): no prior head, the KL term pulls the posterior
+#                     towards N(0, I) and test time samples N(0, I) (run name gets _standardprior)
 #   gram_std_bestofk  Same backbone with N(0, I) latents, so the label never reaches the latent (no posterior, no KL,
 #                     no beta): ROLLOUTS samples per input (default 8), and only the one closest to a stored solution
 #                     trains. Same 768 sequences per step, so 768 / ROLLOUTS inputs per step. LATENT_SCOPE=sample
@@ -53,8 +55,8 @@ case $method in
     KL_COEF=${KL_COEF:-${beta}}
     data=${root}
     rollouts=1
-    arch_args="${backbone} arch.kl_balance_alpha=0.8 arch.kl_coef=${KL_COEF}"
-    run=gram_kl${KL_COEF}_steps${steps}_seed${seed} ;;
+    arch_args="${backbone} arch.kl_balance_alpha=0.8 arch.kl_coef=${KL_COEF}${PRIOR_NOISE:+ arch.prior_noise=${PRIOR_NOISE}}"
+    run=gram_kl${KL_COEF}${PRIOR_NOISE:+_${PRIOR_NOISE}prior}_steps${steps}_seed${seed} ;;
   gram_std_bestofk|gram_std_nearest|gram_std_balanced)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}
