@@ -196,8 +196,8 @@
   \vspace{0.6em}
   \raggedright\small
     \begin{itemize}\setlength{\itemsep}{0.5em}
-    \item \textbf{Higher $\beta$ (collapse):} the random guidance stops carrying information. At $2\times$ reference $\beta$, distinct@100 falls to 0-2.2 on every task and GRAM solves only single-solution puzzles.
-    \item \textbf{Lower $\beta$ (prior-posterior mismatch):} at $\frac{1}{2}\times$ reference $\beta$, validity drops for most tasks, even on single-solution puzzles (sampling from the posterior for test input stays 99-100\% valid). The posterior uses guidance that was not learned by prior due to low beta.
+    \item \textbf{Higher $\beta$ (collapse):} the random guidance stops carrying information. At $2\times$ reference $\beta$, distinct@100 falls to 0-2.2 on every task. GRAM still solves single-solution puzzles (88-100\%) but commits to one answer on every input, and fails many multi-solution ones (34-87\% validity).
+    \item \textbf{Lower $\beta$ (prior-posterior mismatch):} at $\frac{1}{2}\times$ reference $\beta$, validity drops for most tasks, even on single-solution puzzles (sampling from the posterior, which is given a stored solution, stays 99-100\% valid): the posterior relies on guidance that the prior, weakly tied to it at low $\beta$, never learns to produce.
     \end{itemize}
 \end{frame}
 
@@ -235,7 +235,7 @@
 % SLIDE 8: Q3 - Unseen Solutions
 
 \begin{frame}{Q3: Do Models Generate Unseen Solutions?}
-  \textbf{Answer:} Yes! Every model generates unseen solutions about as often as a uniform sampler.
+  \textbf{Answer:} Yes. Every model generates unseen solutions about as often as a uniform sampler.
 
   \vspace{0.6em}
   \centering
@@ -292,7 +292,7 @@
   \verdictpartial
   \vspace{0.3em}
   \begin{itemize}\setlength{\itemsep}{0.3em}
-    \item \textbf{Hypothesis:} \Bok{} varies little because its high-level state is nearly deterministic; adding $\mathcal{N}(0,\sigma^2)$ noise in every non-gradient transition (as in PTRM~\cite{sghaier2026}) should help.
+    \item \textbf{Hypothesis:} \Bok{} varies little because its high-level state is nearly deterministic; adding $\mathcal{N}(0,\sigma^2)$ noise to it at every transition (as in PTRM~\cite{sghaier2026}) should help.
   \end{itemize}
   \vspace{0.3em}
   \centering
@@ -313,7 +313,7 @@
   \vspace{0.5em}
   \raggedright\small
   \begin{itemize}\setlength{\itemsep}{0.3em}
-    \item Adds diversity for small drop in validity, however outside of Sudoku the improvements in diversity are insignificant.
+    \item Adds diversity at little or no cost in validity, but outside Sudoku the gain is small (at most +2.2 distinct@100).
     \item Very similar observations when tested on MinLoss, where again Sudoku was the only one with meaningful increase in diversity.
   \end{itemize}
 \end{frame}
@@ -361,7 +361,7 @@
   \vspace{0.15em}
   \footnotesize
   \begin{itemize}\setlength{\itemsep}{0.2em}
-    \item \textbf{Hypothesis:} \Bok{} trains only 1 of 8 rollouts. Training all 8 either toward each rollout's closest target (\textbf{Nearest}) or capped at $\lceil 8/\text{stored}\rceil$ per target (\textbf{Balanced}) should spread them across solutions.
+    \item \textbf{Hypothesis:} \Bok{} trains only 1 of 8 rollouts. Training all 8, either toward each rollout's closest target (\textbf{Nearest}) or capped at $\lceil 8/\text{stored}\rceil$ per target (\textbf{Balanced}), should spread them across solutions.
   \end{itemize}
 
   \vspace{0.2em}
@@ -429,7 +429,7 @@
 
   \vspace{0.2em}
   \footnotesize
-  \textbf{Hypothesis:} Idea 3 suggested \bok{} underuses guidance because only the last transition of a supervision step carries gradient (where per-cell guidance arrives just before the output head). Keeping gradients through \textbf{every transition} lets earlier guidance shape the whole trajectory.
+  \textbf{Hypothesis:} In training, only the last transition of each supervision step carries gradient, and the guidance on that path is drawn per cell just before the output. This may be why the network cannot tell draws apart (Idea 3). Keeping gradients through \textbf{every transition} lets earlier guidance shape the whole answer.
 
   \vspace{0.25em}
   \centering
@@ -462,7 +462,7 @@
   \resizebox{\textwidth}{!}{%
   \begin{tabular}{@{}lcccc@{}}
     \toprule
-    \textbf{Task (validation run summaries)} & \textbf{GRAM} & \textbf{\Bok{}} & \textbf{Idea 5 (+ full grad)} & \textbf{MinLoss} \\
+    \textbf{Task (validation run summaries)} & \textbf{GRAM} & \textbf{\Bok{}} & \textbf{Idea 5 (\bok{} + full gradient)} & \textbf{MinLoss} \\
     \midrule
     Sudoku & 92.5 / 97.6 / \textbf{34.0} (87\%) & \secbest{99.2} / 99.3 / 10.4 (26\%) & \textbf{99.5} / \secbest{99.7} / \secbest{17.0} (43\%) & \textbf{99.5} / \textbf{99.8} / 2.5 (6\%) \\
     Graph colouring & 97.0 / 97.4 / \textbf{44.9} (93\%) & \textbf{99.8} / \textbf{100.0} / \secbest{38.4} (79\%) & 83.8 / 89.7 / 25.9 (54\%) & \secbest{99.7} / \secbest{99.5} / 1.8 (4\%) \\
@@ -535,7 +535,7 @@
 \begin{frame}{Future Work}
   \footnotesize
   \begin{itemize}\setlength{\itemsep}{0.5em}
-    \item \textbf{Measure the mechanism directly:} test whether trained models ignore their stochastic guidance, by changing only the stochastic guidance and measuring how much the embedding changes, rather than inferring it from the diversity of decoded outputs.
+    \item \textbf{Measure the mechanism directly:} test whether trained models ignore their stochastic guidance, by changing only the stochastic guidance and measuring how much the high-level state and the answer change, rather than inferring it from the diversity of decoded outputs.
     \item \textbf{Randomness that can choose a whole solution:} combine the persistent randomness of Idea 2 with gradient through every transition (Idea 5), then revisit training every rollout (Idea 3).
     \item \textbf{$\beta$ per input:} choosing one of $n$ solutions takes about $\ln n$ nats, so a single $\beta$ cannot suit puzzles with 3 and with 300 solutions; scale the KL weight with the number of solutions.
     \item \textbf{Energy-based reasoners}~\cite{chen2026,hoover2026}: compare a model that scores whole answers with our recursive models on the same puzzles.
