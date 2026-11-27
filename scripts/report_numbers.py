@@ -2,7 +2,7 @@
 
 Usage: python scripts/report_numbers.py [task ...]    (default: every task with results)
 
-Reads results/<task>-val/*.json and results/<task>-train/*.json written by scripts/multi_evaluate.sh, skipping the
+Reads results/<task>-val/*.json, results/<task>-test/*.json and results/<task>-train/*.json written by scripts/multi_evaluate.sh, skipping the
 per-checkpoint files of scripts/score_checkpoints.sh (those go through scripts/checkpoint_trends.py). Prints validity,
 unique-solution validity and distinct@100; for the train split also the unseen share against a uniform sampler's and
 distinct unseen per input.
@@ -13,9 +13,9 @@ import os
 import re
 import sys
 
-tasks = sys.argv[1:] or sorted({os.path.basename(d).rsplit("-", 1)[0] for d in glob.glob("results/*-val") + glob.glob("results/*-train")})
+tasks = sys.argv[1:] or sorted({os.path.basename(d).rsplit("-", 1)[0] for d in glob.glob("results/*-val") + glob.glob("results/*-test") + glob.glob("results/*-train")})
 for task in tasks:
-    for split in ("val", "train"):
+    for split in ("val", "test", "train"):
         for path in sorted(glob.glob(f"results/{task}-{split}/*.json")):
             name = os.path.basename(path)[:-5]
             if re.search(r"_step\d+$", name) or name == "summary":
