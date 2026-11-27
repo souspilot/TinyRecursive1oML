@@ -235,14 +235,16 @@ gradient through every transition lets earlier guidance shape the whole answer. 
 |---|---|---|
 | Sudoku | 99.2 / 99.3 / 10.4 | 99.5 / 99.7 / **17.0** |
 | Maze (40k steps) | 83.3 / 75.4 / 2.2 | 81.2 / 68.8 / **3.6** |
-| Heyawake (to step 95k) | 85.3 / 81.9 / 9.7 | **88.6 / 90.4** / 5.1 |
-| Nurikabe (σ = 0.5, step 87k) | 78.5 / 79.3 / 7.7 | **85.0 / 86.9** / 5.4 |
+| Heyawake | 85.3 / 81.9 / 9.7 | **90.2 / 92.2** / 5.5 |
+| Nurikabe | 78.7 / 78.4 / 7.2 | **87.3 / 86.9** / 4.8 |
 | Graph colouring | 99.8 / 100.0 / 38.4 | running |
 
 It is the first change to training that raised best-of-K's diversity at no cost in validity (Sudoku and mazes). On the
-human-made puzzles it makes the baseline a better solver instead (+3 to +7 validity, +8 unique-solution validity) with
-fewer distinct answers. With state noise σ = 1 on Sudoku it reaches 28.1, the same limit as idea 1. Rows marked with a
-step are from runs still in progress on 27 November 2026; this is the starting point for further work.
+human-made puzzles it makes the baseline a better solver (+5 to +9 validity, +8 to +10 unique-solution validity) with
+fewer distinct answers, but a better trade-off than mixing best-of-K and MinLoss: on nurikabe 4.8 distinct@100 at
+87.3% validity, where the line between the two gives 2.2, and 5 points more valid than GRAM. With state noise σ = 1
+on Sudoku it reaches 28.1, the same limit as idea 1. The maze run was trained for 40k steps only. This is the starting
+point for further work.
 
 ## 6. Reproducing each table
 
