@@ -114,16 +114,26 @@ python scripts/report_numbers.py sudoku
 
 ### Validity against diversity
 
-Run summaries on validation; *test* is the final checkpoint on the 2000 test inputs. The highest validity and
-distinct@100 of each task are in bold.
+**Validation** (run summaries). The highest validity and distinct@100 of each task are in bold.
 
-| Task | GRAM (reference β) | Best-of-K | MinLoss | Test: GRAM / best-of-K / MinLoss validity |
-|---|---|---|---|---|
-| Sudoku | 92.5 / 97.6 / **34.0** | 99.2 / 99.3 / 10.4 | **99.5** / 99.8 / 2.5 | 89.9 / 99.5 / 99.5 |
-| Graph colouring | 97.0 / 97.4 / **44.9** | **99.8** / 100.0 / 38.4 | 99.7 / 99.5 / 1.8 | 99.0 / 99.6 / 99.9 |
-| Maze (GRAM at ½β, 0.01) | 67.3 / 48.2 / **35.3** | 83.3 / 75.4 / 2.2 | **88.4** / 94.1 / 1.0 | 66.7 / 88.8 / 84.1 |
-| Heyawake | 78.7 / 72.0 / **33.8** | 85.3 / 81.9 / 9.7 | **96.2** / 97.6 / 1.3 | 77.0 / 81.7 / 94.4 |
-| Nurikabe | 82.0 / 83.9 / **29.8** | 78.7 / 78.4 / 7.2 | **89.1** / 94.4 / 1.2 | 81.1 / 77.9 / 86.1 |
+| Task | GRAM (reference β) | Best-of-K | MinLoss |
+|---|---|---|---|
+| Sudoku | 92.5 / 97.6 / **34.0** | 99.2 / 99.3 / 10.4 | **99.5** / 99.8 / 2.5 |
+| Graph colouring | 97.0 / 97.4 / **44.9** | **99.8** / 100.0 / 38.4 | 99.7 / 99.5 / 1.8 |
+| Maze (GRAM at ½β, 0.01) | 67.3 / 48.2 / **35.3** | 83.3 / 75.4 / 2.2 | **88.4** / 94.1 / 1.0 |
+| Heyawake | 78.7 / 72.0 / **33.8** | 85.3 / 81.9 / 9.7 | **96.2** / 97.6 / 1.3 |
+| Nurikabe | 82.0 / 83.9 / **29.8** | 78.7 / 78.4 / 7.2 | **89.1** / 94.4 / 1.2 |
+
+**Test** (final checkpoint, all 2000 test inputs). Best-of-K with state noise (idea 1) is included; maze GRAM at the
+reference β (0.02) is 39.5 / 97.6 / 1.5.
+
+| Task | GRAM | Best-of-K | Best-of-K, σ = 0.5 | Best-of-K, σ = 1 | MinLoss |
+|---|---|---|---|---|---|
+| Sudoku | 89.9 / 97.3 / **32.6** | 99.5 / 99.9 / 11.8 | 99.4 / 99.9 / 27.8 | 97.5 / 99.8 / 29.3 | **99.5** / 100.0 / 2.8 |
+| Graph colouring | 99.0 / 99.7 / **46.6** | 99.6 / 99.9 / 39.6 | 99.6 / 99.9 / 40.0 | 99.3 / 99.9 / 41.0 | **99.9** / 100.0 / 1.9 |
+| Maze (GRAM at 0.01) | 66.7 / 52.2 / **35.9** | **88.8** / 78.3 / 2.1 | | | 84.1 / 94.5 / 0.9 |
+| Heyawake | 77.0 / 68.7 / **33.1** | 81.7 / 77.9 / 9.9 | 81.4 / 77.8 / 10.4 | 80.4 / 77.2 / 11.3 | **94.4** / 93.7 / 1.3 |
+| Nurikabe | 81.1 / 80.3 / **31.0** | 77.9 / 79.1 / 7.8 | 77.4 / 78.9 / 8.3 | 75.2 / 77.8 / 8.9 | **86.1** / 89.0 / 1.3 |
 
 On the test split every value is within 6 points of validation and the ranking is the same on every task: GRAM is the
 most diverse, MinLoss or best-of-K the most valid. On heyawake GRAM fails single-solution inputs (72.0% against
@@ -178,8 +188,10 @@ in every transition without gradient (`--state_noise` in `sample_predictions.py`
 | Heyawake | 85.3 / 9.7 | 85.0 / 10.7 | 83.6 / 11.7 |
 | Nurikabe | 78.7 / 7.2 | 78.5 / 7.7 | 76.9 / 8.5 |
 
-(validity / distinct@100.) Triples distinct@100 on Sudoku at no cost in validity, but adds at most 2 elsewhere; at
-σ = 1.5 Sudoku validity falls to 23%.
+(validity / distinct@100, final checkpoint.) Triples distinct@100 on Sudoku at no cost in validity, but adds at most 2
+elsewhere; at σ = 1.5 Sudoku validity falls to 23%. On MinLoss it adds little on the human-made puzzles: heyawake
+95.3 / 2.4 and 94.7 / 3.5 at σ = 0.5 and 1 (96.2 / 1.3 without), nurikabe 88.7 / 2.4 and 87.1 / 3.7 (89.1 / 1.2),
+against Sudoku's 2.5 → 18.0 at σ = 0.5.
 
 ### Idea 2: other sources of randomness. Failure
 
@@ -199,11 +211,21 @@ spread the rollouts over the stored solutions. **Changes:** method `gram_std_nea
 closest stored solution) and `gram_std_balanced` (each stored solution gets at most ⌈8 / stored⌉ rollouts, closest
 pairs first; a rollout sent elsewhere has weight `FORCED_WEIGHT=0.3`), in `ACTLossHead` and `balanced_assignment`.
 
-**Result (Sudoku):** nearest 99.3 / 100.0 / 4.6 and balanced 99.2 / 99.8 / 3.3, against best-of-K's 10.4. Balanced
-kept half its rollouts on another solution to the end, yet its answers did not spread. The network cannot tell from
-the stochastic guidance which solution a rollout is meant for, so it learns to ignore the guidance. Best-of-K's
-diversity comes from the rollouts it leaves untrained. With one vector per sample (idea 2) as well: 4.1 on Sudoku,
-and lower validity on heyawake (80.0) and nurikabe (56.8).
+| Objective | Sudoku | σ = 0.5 | σ = 1 |
+|---|---|---|---|
+| Best-of-K (trains the closest rollout only) | 99.2 / 99.3 / 10.4 | 99.5 / 27.7 | 97.5 / 29.1 |
+| Nearest | 99.3 / 100.0 / 4.6 | 98.1 / 23.3 | 77.1 / 17.1 |
+| Balanced | 99.2 / 99.8 / 3.3 | 99.1 / 16.8 | 90.0 / 23.5 |
+| Nearest, one vector per sample | 99.8 / 99.9 / 4.1 | | |
+| Balanced, one vector per sample | 99.8 / 100.0 / 4.1 | | |
+
+(σ columns: validity / distinct@100, final checkpoint.) Balanced with one vector per sample on the human-made puzzles:
+heyawake 80.0 / 76.1 / 2.0, nurikabe 56.8 / 57.0 / 1.3.
+
+Training every rollout lowers diversity to MinLoss's level, whichever way targets are assigned. Balanced kept half its
+rollouts on another solution to the end of training, yet its answers did not spread. The network cannot tell from the
+stochastic guidance which solution a rollout is meant for, so it learns to ignore the guidance. Best-of-K's diversity
+comes from the rollouts it leaves untrained.
 
 ### Idea 4: hybrid GRAM. Failure
 
@@ -219,7 +241,11 @@ used in training. Training a share of rows with the prior's stochastic guidance 
 | Sudoku | 92.5 / 97.6 / 34.0 | 62.7 / 99.6 / 1.8 | | |
 | Graph colouring | 97.0 / 97.4 / 44.9 | 99.3 / 99.5 / 2.1 | | |
 
-With 0% prior rows the hybrid reproduces GRAM (heyawake 79.0 / 71.9 / 33.5). With any prior rows, diversity collapses.
+With 0% prior rows the hybrid reproduces GRAM (heyawake 79.0 / 71.9 / 33.5; posterior sampling 99.7 / 99.8 / 13.2).
+With any prior rows, diversity collapses. Posterior sampling on heyawake: 80.4 / 92.9 / 0.9 at 25%, 93.3 / 95.9 / 1.2
+at 50%, 99.2 / 99.5 / 11.7 at 25% with ½β; on nurikabe 25% 71.8 / 93.0 / 0.9, Sudoku 63.8 / 99.4 / 2.1, graph
+colouring 99.7 / 99.4 / 1.8. Unseen solutions (training inputs with more than 16 solutions): heyawake 69.5 (uniform
+71.8), nurikabe 68.9 (69.2), Sudoku 51.2 (50.7), graph colouring 84.4 (84.6).
 The rows trained with MinLoss teach the shared decoder to ignore the stochastic guidance, and even posterior sampling
 then gives 0.9 distinct@100 on heyawake. The posterior rows are then trained towards a random stored solution with
 nothing to say which, so on Sudoku they produce mixtures of solutions that are invalid.
@@ -231,13 +257,17 @@ guidance on that path is drawn per cell just before the output, where it cannot 
 gradient through every transition lets earlier guidance shape the whole answer. **Change:** `FULL_GRAD=1` in
 `scripts/multi_compare.sh` (`grad_all_transitions` in `gram.py`), with best-of-K.
 
-| Task | Best-of-K | + gradient through all transitions |
-|---|---|---|
-| Sudoku | 99.2 / 99.3 / 10.4 | 99.5 / 99.7 / **17.0** |
-| Maze (40k steps) | 83.3 / 75.4 / 2.2 | 81.2 / 68.8 / **3.6** |
-| Heyawake | 85.3 / 81.9 / 9.7 | **90.2 / 92.2** / 5.5 |
-| Nurikabe | 78.7 / 78.4 / 7.2 | **87.3 / 86.9** / 4.8 |
-| Graph colouring | 99.8 / 100.0 / 38.4 | running |
+| Task | Best-of-K | + gradient through all transitions | σ = 0.5 | σ = 1 |
+|---|---|---|---|---|
+| Sudoku | 99.2 / 99.3 / 10.4 | 99.5 / 99.7 / **17.0** | 99.5 / 99.6 / 21.8 | 97.9 / 98.9 / 28.1 |
+| Maze (40k steps) | 83.3 / 75.4 / 2.2 | 81.2 / 68.8 / **3.6** | 83.3 / 71.9 / 6.7 | 78.2 / 66.5 / 10.4 |
+| Heyawake | 85.3 / 81.9 / 9.7 | **90.2 / 92.2** / 5.5 | 90.5 / 93.0 / 7.7 | 82.1 / 88.1 / 10.6 |
+| Nurikabe | 78.7 / 78.4 / 7.2 | **87.3 / 86.9** / 4.8 | 84.8 / 84.5 / 6.1 | 69.3 / 72.5 / 5.6 |
+| Graph colouring | 99.8 / 100.0 / 38.4 | running | | |
+
+(σ columns: state noise at test time on the final checkpoint.) The balanced objective of idea 3 with gradient through
+all transitions (Sudoku) reaches 12.6 distinct@100 but is unstable: 78.6 / 75.9 / 12.6, with one checkpoint at 39.5%
+valid.
 
 It is the first change to training that raised best-of-K's diversity at no cost in validity (Sudoku and mazes). On the
 human-made puzzles it makes the baseline a better solver (+5 to +9 validity, +8 to +10 unique-solution validity) with
