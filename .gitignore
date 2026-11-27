@@ -16,4 +16,4 @@
 *.bbl
 *.blg
 *.out
-
+results_hpc/*
