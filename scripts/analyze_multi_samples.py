@@ -5,7 +5,7 @@ Usage: python scripts/analyze_multi_samples.py --task sudoku --data data/sudoku-
 
 --data is the -1oml dataset the samples came from (its label_set holds each input's stored solutions); each run in
 --samples is a directory with meta.json and shards, sampled from the split named in its meta.json (test by default).
-Tasks: maze, nqueens, sudoku, graph, heyawake, nurikabe, lightup. Validity uses the task's own checker (evaluators/*_utils.py). Two
+Tasks: maze, nqueens, sudoku, graph, heyawake, nurikabe. Validity uses the task's own checker (evaluators/*_utils.py). Two
 samples are the same solution when they agree on the cells that make up the answer (for graph colouring, after
 renaming colours to canonical form, so a colouring and its relabelling count once).
 
@@ -44,12 +44,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evaluators.graph_coloring_utils import verify_coloring  # noqa: E402
 from evaluators.heyawake_utils import decode as decode_heyawake, verify_heyawake  # noqa: E402
 from evaluators.nurikabe_utils import decode as decode_nurikabe, verify_nurikabe  # noqa: E402
-from evaluators.lightup_utils import decode as decode_lightup, verify_lightup  # noqa: E402
 from evaluators.maze_utils import batch_verify_maze  # noqa: E402
 from evaluators.nqueens_utils import verify_nqueens  # noqa: E402
 from evaluators.sudoku_utils import verify_sudoku  # noqa: E402
 
-TASKS = ("maze", "nqueens", "sudoku", "graph", "heyawake", "nurikabe", "lightup")
+TASKS = ("maze", "nqueens", "sudoku", "graph", "heyawake", "nurikabe")
 SAMPLE_COUNTS = (1, 2, 5, 10, 20, 50, 100, 250, 500, 1000)
 COUNT_BUCKETS = ((1, 1), (2, 3), (4, 15), (16, 63), (64, 255), (256, 2**62))
 # Bump when the metrics change, so saved results (<out>/<run>.json) are recomputed rather than reused
@@ -97,8 +96,6 @@ class Task:
             out = np.array([verify_heyawake(x, p, dec) for x, ps in zip(inputs, preds) for dec in [decode_heyawake(x)] for p in ps])
         elif self.name == "nurikabe":
             out = np.array([verify_nurikabe(x, p, dec) for x, ps in zip(inputs, preds) for dec in [decode_nurikabe(x)] for p in ps])
-        elif self.name == "lightup":
-            out = np.array([verify_lightup(x, p, dec) for x, ps in zip(inputs, preds) for dec in [decode_lightup(x)] for p in ps])
         else:
             # verify_coloring skips nodes without a colour token (< 3), so require one on every node
             out = np.array([(p[:self.answer_len] >= 3).all() and verify_coloring(x, p) for x, p in zip(flat_inputs, flat_preds)])

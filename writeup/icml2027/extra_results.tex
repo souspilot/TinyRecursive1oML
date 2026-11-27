@@ -218,16 +218,4 @@ Validity / distinct@100, final checkpoint: heyawake $\sigma=0.5$ 95.3 / 2.4, $\s
 1.3); nurikabe 88.7 / 2.4 and 87.1 / 3.7 (without: 89.1 / 1.2). State noise gives MinLoss little diversity on the
 human-made tasks, unlike Sudoku (2.5 to 18.0).
 
-\section{Random 3-SAT}
-
-A benchmark of random 3-SAT formulas over 16 variables (clause density $U[1,4.5]$, up to a quarter of the variables
-given) was built the same way. The baseline did not learn it: 0.4\% of its samples were valid after 50k optimiser
-steps, close to random assignments. GRAM failed the same way in an earlier configuration. Excluded until the cause is
-understood.
-
-\section{Light up}
-
-A light up (akari) benchmark from Pencil Puzzle Bench was built (builder and checker in the code) but not used: five
-tasks were fixed before it finished.
-
 \end{document}

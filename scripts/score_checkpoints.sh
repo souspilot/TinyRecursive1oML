@@ -2,7 +2,7 @@
 # Score a run's saved checkpoints on the validation split, to see how validity and diversity change during training.
 # Read the result with scripts/checkpoint_trends.py.
 #
-# Usage: bash scripts/score_checkpoints.sh <maze|nqueens|sudoku|graph|heyawake|nurikabe|lightup> <run>
+# Usage: bash scripts/score_checkpoints.sh <maze|nqueens|sudoku|graph|heyawake|nurikabe> <run>
 #
 # Env: EVERY scores every EVERY-th checkpoint counted back from the last, so the last is always included (default 2);
 # QUERIES validation inputs (default 500); SAMPLES per input (default 100). A failed checkpoint is reported and skipped,
@@ -17,8 +17,7 @@ case $dataset in
   graph)   project=Graph-coloring-multi ;;
   heyawake) project=Heyawake-multi ;;
   nurikabe) project=Nurikabe-multi ;;
-  lightup) project=Lightup-multi ;;
-  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph, heyawake, nurikabe, lightup)"; exit 1 ;;
+  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph, heyawake, nurikabe)"; exit 1 ;;
 esac
 every=${EVERY:-2}
 steps=$(ls -d checkpoints/${project}/${run}/step_* | sed 's/.*step_//' | grep -E '^[0-9]+$' | sort -nr \

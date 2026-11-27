@@ -9,7 +9,6 @@
 #   graph     3-colouring of 10-node graphs, 1 to 9842 sols  (dataset/build_graph_coloring_multi_dataset.py)
 #   heyawake  10x10 heyawake from Pencil Puzzle Bench, 1 to 1023 sols  (dataset/build_heyawake_multi_dataset.py)
 #   nurikabe  10x10 nurikabe from Pencil Puzzle Bench, 1 to 1023 sols  (dataset/build_nurikabe_multi_dataset.py)
-#   lightup   10x10 light up from Pencil Puzzle Bench, 1 to 1023 sols  (dataset/build_lightup_multi_dataset.py)
 #             The Pencil Puzzle Bench sets have their own validation split and are not in the default list: they
 #             need clingo and PPBENCH_SOURCE=<path to the benchmark's full_dataset.jsonl>
 #
@@ -39,11 +38,9 @@ for d in ${datasets}; do
       built data/heyawake-multi-1oml || python dataset/build_heyawake_multi_dataset.py --source "${PPBENCH_SOURCE:?set PPBENCH_SOURCE}" --num-train 100000 --num-test 2000 --output-dir data/heyawake-multi ;;
     nurikabe)
       built data/nurikabe-multi-1oml || python dataset/build_nurikabe_multi_dataset.py --source "${PPBENCH_SOURCE:?set PPBENCH_SOURCE}" --num-train 100000 --num-test 2000 --output-dir data/nurikabe-multi ;;
-    lightup)
-      built data/lightup-multi-1oml || python dataset/build_lightup_multi_dataset.py --source "${PPBENCH_SOURCE:?set PPBENCH_SOURCE}" --num-train 100000 --num-test 2000 --output-dir data/lightup-multi ;;
-    *) echo "Unknown dataset: $d (maze, nqueens, sudoku, graph, heyawake, nurikabe, lightup)"; exit 1 ;;
+    *) echo "Unknown dataset: $d (maze, nqueens, sudoku, graph, heyawake, nurikabe)"; exit 1 ;;
   esac
 done
-others=$(echo ${datasets} | tr ' ' '\n' | grep -vE '^(heyawake|nurikabe|lightup)$' | tr '\n' ' ')
+others=$(echo ${datasets} | tr ' ' '\n' | grep -vE '^(heyawake|nurikabe)$' | tr '\n' ' ')
 [ -z "${others// }" ] || python dataset/build_validation_split.py ${others}
 echo "Done: ${datasets}"
