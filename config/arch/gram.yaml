@@ -6,7 +6,8 @@ loss:
   kl_balance_alpha: ${..kl_balance_alpha}
   free_bits: ${..free_bits}
   value_coef: ${..value_coef}
-  one_of_many: naive  # bestofk (with train_latent=prior and rollouts > 1): train only the prior sample closest to a stored solution
+  one_of_many: naive  # bestofk (with train_latent=prior and rollouts > 1): train only the prior sample closest to a stored solution, nearest: train every rollout towards its own closest, balanced: spread the rollouts over the stored solutions (see losses.py)
+  forced_weight: 0.3  # balanced only: weight of a rollout assigned to a stored solution other than its own closest
 
 halt_exploration_prob: 0.1
 halt_max_steps: 16
@@ -46,6 +47,9 @@ strm_min_rate: 0.07692307692307693 # STRM: rate of the slowest channel (1/13); h
 strm_rate_jitter: 1.5 # STRM, training only: rates a^c per sample, c = J^u, u ~ U[-1, 1]
 strm_init: fixed # STRM start state: fixed (one random vector, as in STRM) or sample (new N(0, I) vector per sample)
 train_state_noise: 0.0 # training only: N(0, s^2) noise on the high-level state after each intermediate cycle (test-time noise is --state_noise)
+grad_all_transitions: False # training only: gradient through every transition of a supervision step, not just the last
+hybrid: False # training only: a prior_rows share of rows use the prior's latent and MinLoss (see gram.py)
+prior_rows: 0.25
 fix_mu: False # if True, force mu = 0 for both prior and posterior (ablation)
 fix_std: False # if True, force std = 0 for both prior and posterior, deterministic (ablation)
 

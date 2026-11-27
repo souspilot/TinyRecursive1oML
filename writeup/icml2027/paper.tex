@@ -294,7 +294,7 @@ the best maze value in \cref{sec:band}, chosen on the same validation inputs.}
 \legend{GRAM across $\beta$, \Bok{} across $\sigma$, MinLoss}
 \addplot[only marks, mark=o, mark size=3pt, blue, forget plot] coordinates {(35.9,0.8)};
 \nextgroupplot[title={Heyawake}, ymax=40]
-\addplot[only marks, mark=*, mark size=1.4pt, blue] coordinates {(78.7,33.8) (61.0,0.5)};
+\addplot[only marks, mark=*, mark size=1.4pt, blue] coordinates {(2.2,1.8) (78.7,33.8) (61.0,0.5)};
 \addplot[only marks, mark=square*, mark size=1.4pt, red] coordinates {(85.3,9.7) (85.0,10.7) (83.6,11.7)};
 \addplot[only marks, mark=triangle*, mark size=1.6pt, black!50] coordinates {(96.2,1.3)};
 \addplot[only marks, mark=o, mark size=3pt, blue, forget plot] coordinates {(78.7,33.8)};
@@ -308,7 +308,7 @@ the best maze value in \cref{sec:band}, chosen on the same validation inputs.}
 \caption{Validity against distinct@100 on validation inputs; up and to the right is better. Blue: GRAM at
 $\frac12$, 1 and 2 times the reference $\beta$, with a ring at the reference $\beta$. Red: the \bok{} baseline with
 state noise $\sigma=0$, 0.5 and 1. Grey: MinLoss. On every task, the model with the most distinct@100 is GRAM and
-the most valid is a baseline. Heyawake at half the reference $\beta$: \tbd.}
+the most valid is a baseline.}
 \label{fig:frontier}
 \end{figure*}
 
@@ -344,13 +344,15 @@ Task & $\frac12\beta_{\mathrm{ref}}$ & $\beta_{\mathrm{ref}}$ & $2\beta_{\mathrm
 Sudoku & 53.6 / 79.8 / 14.4 & 92.5 / 97.6 / 34.0 & 35.4 / 98.3 / 0.3 \\
 Graph col. & 71.5 / 93.4 / 31.2 & 97.0 / 97.4 / 44.9 & 86.5 / 100.0 / 2.2 \\
 Maze & 67.3 / 48.2 / 35.3 & 35.9 / 97.8 / 0.8 & 33.8 / 98.6 / 0.0 \\
-Heyawake & \tbd & 78.7 / 72.0 / 33.8 & 61.0 / 95.2 / 0.5 \\
+Heyawake & 2.2 / 1.6 / 1.8 & 78.7 / 72.0 / 33.8 & 61.0 / 95.2 / 0.5 \\
 Nurikabe & 0.1 / 0.0 / 0.1 & 82.0 / 83.9 / 29.8 & 54.3 / 88.2 / 0.5 \\
 \bottomrule
 \end{tabular}
 \caption{GRAM across $\beta$: validity (\%) / unique-solution validity (\%) / distinct@100, validation, run
 summaries. $\beta_{\mathrm{ref}}$: Sudoku 0.05, graph colouring 0.45, maze 0.02, heyawake and nurikabe 0.045.
-Heyawake also has a run at $4\beta_{\mathrm{ref}}$: \tbd.}
+Between $\beta_{\mathrm{ref}}$ and $2\beta_{\mathrm{ref}}$, heyawake and nurikabe also have runs at 0.057
+($1.27\times$) and 0.071 ($1.6\times$), and heyawake at 0.18 ($4\times$); all collapse, with distinct@100 0.6 and
+validity 54--61\%.}
 \label{tab:beta}
 \end{table}
 
@@ -364,7 +366,7 @@ Task & $\frac12\beta_{\mathrm{ref}}$ & $\beta_{\mathrm{ref}}$ & $2\beta_{\mathrm
 Sudoku & 53.6 / 100.0 & 92.5 / 100.0 & 35.4 / 36.6 \\
 Graph col. & 71.5 / 100.0 & 97.0 / 99.5 & 86.5 / 85.6 \\
 Maze & 67.3 / 99.7 & 35.9 / 39.1 & 33.8 / 34.0 \\
-Heyawake & \tbd & 78.7 / 99.4 & 61.0 / 60.1 \\
+Heyawake & 2.2 / 99.3 & 78.7 / 99.4 & 61.0 / 60.1 \\
 Nurikabe & 0.1 / 100.0 & 82.0 / 98.3 & 54.3 / 54.6 \\
 \bottomrule
 \end{tabular}
@@ -377,7 +379,8 @@ agree, as expected when the stochastic guidance carries nothing.}
 GRAM's authors set $\beta$ separately for every task. We trained every task at half and twice its reference $\beta$
 (\cref{tab:beta}). On every finished task, a factor of two in one direction from the best $\beta$ costs much of its
 validity, its distinct@100 or both. We call the range of $\beta$ in which neither failure below dominates the
-\emph{band}; on every finished task it is narrower than a factor of two on each side.
+\emph{band}. On every task it is narrower than a factor of two on each side, and on heyawake and nurikabe it ends
+less than a factor of 1.3 above the reference $\beta$.
 
 \paragraph{Above the band: posterior collapse.} At twice the reference $\beta$, distinct@100 drops to 0--2.2 while
 unique-solution validity stays at 88--100\%: the model solves inputs with one solution and fails those with several.
@@ -393,12 +396,14 @@ gets at test time. We call this \emph{prior--posterior mismatch}: the posterior 
 guidance that the prior does not produce, so prior sampling gives the network values it was not trained on.
 
 \paragraph{A rule carried over from other tasks misses the band.} The rule $\beta\times\text{cells}\approx4.5$, which
-fits the authors' tasks, put mazes at the edge of posterior collapse; their best $\beta$ is half of that. On both
-human-made tasks it errs the other way: at the reference $\beta$, unique-solution validity is low (72.0\% and
-83.9\%) while posterior sampling is 99.4\% and 98.3\% valid, the signature of mismatch, yet twice the reference
-$\beta$ already collapses (distinct@100 0.5 on both). If a better $\beta$ exists for these tasks, it lies within a
-factor of two above the reference (\tbd). For Q1, $\beta$ has to be tuned on validation inputs for every new task,
-and posterior sampling tells which way to move it.
+fits the authors' tasks, put mazes at the edge of posterior collapse; their best $\beta$ is half of that. On the
+human-made tasks it lands inside the band, but the band is narrow. Half the reference $\beta$ fails through mismatch
+(heyawake 2.2\% valid with posterior sampling 99.3\% valid; nurikabe 0.1\% and 100\%), and 1.27 times the reference
+already collapses (distinct@100 0.6 on both, and the same at 1.6, 2 and 4 times). Even at the reference $\beta$ some
+mismatch remains: unique-solution validity is 72.0\% and 83.9\% while posterior sampling is 99.4\% and 98.3\% valid.
+So GRAM's validity loss on heyawake does not come from a badly chosen $\beta$: no $\beta$ we tried keeps its
+diversity with higher validity. For Q1, $\beta$ has to be tuned on validation inputs for every new task, in steps
+smaller than a factor of two, and posterior sampling tells which way to move it.
 
 \paragraph{One $\beta$ for every number of solutions.} On mazes at $\beta=0.02$, GRAM's validity falls with the number
 of solutions: 97.8\% at one, 48.4\% at 2--3, 19.2\% at 4--15, 1.9\% at 16--63 and 0\% above 64 (training inputs). The

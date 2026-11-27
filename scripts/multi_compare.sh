@@ -15,6 +15,15 @@
 #                     trains. Same 768 sequences per step, so 768 / ROLLOUTS inputs per step. LATENT_SCOPE=sample
 #                     draws one latent per sample, shared by all positions and kept for the whole sample, instead of a
 #                     new one per position and cycle (run name gets _sample)
+#   gram_std_nearest  The same, but every rollout trains, towards its own closest stored solution
+#   gram_std_balanced The same, but every rollout trains, and the rollouts are spread over the stored solutions: each
+#                     solution takes at most ceil(ROLLOUTS / stored) rollouts, closest pairs first. A rollout sent to
+#                     a solution other than its own closest has weight FORCED_WEIGHT (default 0.3; run name _fw<w>)
+#                     FULL_GRAD=1 (these three) keeps the gradient through every transition of a supervision step,
+#                     so the earlier stochastic guidance is trained too (run name _fullgrad; ~3x activation memory)
+#   gram_hybrid       GRAM on the -1oml data, where a PRIOR_ROWS share of the batch rows (default 0.25) draw their latent
+#                     from the learned prior, as at test time, and train towards their closest stored solution
+#                     (MinLoss); the KL term covers the other rows. PRIOR_ROWS=0 is GRAM through this code path
 #   strm_bestofk      The same best-of-K training on STRM's recursion (Glass et al. 2026): one state whose channels are
 #                     moving averages at fixed rates, heads on the slow channels. Randomness comes from STRM_INIT=sample
 #                     (default: a new random start state per sample) and/or LATENT_SCOPE=sample (default none: an N(0, I)
@@ -37,8 +46,7 @@ case $dataset in
   # Not tuned: beta x answer cells ~ 4.5, the rule that fits Sudoku, N-Queens and graph colouring
   heyawake) root=data/heyawake-multi project=Heyawake-multi beta=0.045 ;;
   nurikabe) root=data/nurikabe-multi project=Nurikabe-multi beta=0.045 ;;
-  lightup) root=data/lightup-multi project=Lightup-multi beta=0.045 ;;
-  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph, heyawake, nurikabe, lightup)"; exit 1 ;;
+  *) echo "Unknown dataset: ${dataset} (maze, nqueens, sudoku, graph, heyawake, nurikabe)"; exit 1 ;;
 esac
 
 backbone="arch=gram arch.L_layers=2 arch.H_cycles=3 arch.L_cycles=4"
@@ -49,11 +57,18 @@ case $method in
     rollouts=1
     arch_args="${backbone} arch.kl_balance_alpha=0.8 arch.kl_coef=${KL_COEF}"
     run=gram_kl${KL_COEF}_steps${steps}_seed${seed} ;;
-  gram_std_bestofk)
+  gram_hybrid)
+    KL_COEF=${KL_COEF:-${beta}}
+    PRIOR_ROWS=${PRIOR_ROWS:-0.25}
+    data=${root}-1oml
+    rollouts=1
+    arch_args="${backbone} arch.kl_balance_alpha=0.8 arch.kl_coef=${KL_COEF} arch.hybrid=True arch.prior_rows=${PRIOR_ROWS}"
+    run=gram_hybrid_pr${PRIOR_ROWS}_kl${KL_COEF}_steps${steps}_seed${seed} ;;
+  gram_std_bestofk|gram_std_nearest|gram_std_balanced)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}
-    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}${TRAIN_NOISE:+ arch.train_state_noise=${TRAIN_NOISE}}"
-    run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${TRAIN_NOISE:+_tn${TRAIN_NOISE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
+    arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=${method#gram_std_} +rollouts=${rollouts}${LATENT_SCOPE:+ arch.latent_scope=${LATENT_SCOPE}}${TRAIN_NOISE:+ arch.train_state_noise=${TRAIN_NOISE}}${FORCED_WEIGHT:+ arch.loss.forced_weight=${FORCED_WEIGHT}}${FULL_GRAD:+ arch.grad_all_transitions=True}"
+    run=${method}${LATENT_SCOPE:+_${LATENT_SCOPE}}${TRAIN_NOISE:+_tn${TRAIN_NOISE}}${FORCED_WEIGHT:+_fw${FORCED_WEIGHT}}${FULL_GRAD:+_fullgrad}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
   strm_bestofk)
     data=${root}-1oml
     rollouts=${ROLLOUTS:-8}
@@ -61,7 +76,7 @@ case $method in
     init=${STRM_INIT:-sample}
     arch_args="${backbone} arch.train_latent=prior arch.prior_noise=standard arch.loss.one_of_many=bestofk +rollouts=${rollouts} arch.recursion=strm arch.latent_scope=${scope} arch.strm_init=${init}${STRM_MIN_RATE:+ arch.strm_min_rate=${STRM_MIN_RATE}}${TRAIN_NOISE:+ arch.train_state_noise=${TRAIN_NOISE}}"
     run=strm_bestofk_init${init}_latent${scope}${STRM_MIN_RATE:+_amin${STRM_MIN_RATE}}${TRAIN_NOISE:+_tn${TRAIN_NOISE}}${ROLLOUTS:+_k${ROLLOUTS}}_steps${steps}_seed${seed} ;;
-  *) echo "Unknown method: ${method} (gram, gram_std_bestofk, strm_bestofk)"; exit 1 ;;
+  *) echo "Unknown method: ${method} (gram, gram_hybrid, gram_std_bestofk, gram_std_nearest, gram_std_balanced, strm_bestofk)"; exit 1 ;;
 esac
 [ -z "${EXTRA_ARGS}" ] || arch_args="${arch_args} ${EXTRA_ARGS}"
 

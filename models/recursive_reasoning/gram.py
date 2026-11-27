@@ -1,5 +1,6 @@
 from typing import Tuple, List, Dict, Optional
 from dataclasses import dataclass
+import contextlib
 import math
 import torch
 import torch.nn.functional as F
@@ -91,6 +92,15 @@ class GenerativeRecursiveReasoningModelConfig(BaseModel):
     # Training only: N(0, train_state_noise^2) noise on the high-level state after each intermediate cycle, the same
     # noise sample_predictions.py --state_noise adds at test time, so the model learns to answer from noisy states
     train_state_noise: float = 0.0
+    # Training only: keep the gradient through every transition of a supervision step, not just the last, so the
+    # stochastic guidance added in the earlier transitions is on the gradient path (about 3x the activation memory)
+    grad_all_transitions: bool = False
+    # Training only, GRAM with train_latent=posterior and a -1oml dataset: the first prior_rows share of the batch rows
+    # draw their latent from the prior, as at test time, and train towards their closest stored solution (MinLoss, in
+    # losses.py); the KL term covers only the other rows. Each row's posterior target is a stored solution drawn at
+    # random whenever a new input enters the row, which with prior_rows=0 is GRAM's own training
+    hybrid: bool = False
+    prior_rows: float = 0.25
 
     # Variational sampling control (for ablation)
     fix_mu: bool = False  # If True, force mu = 0 (both prior and posterior)
@@ -537,8 +547,13 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
         # Forward iterations
         z_H, z_L = carry.z_H, carry.z_L
         noise = self.config.train_state_noise if self.training else self.state_noise
-        # H_cycles-1 without grad
-        with torch.no_grad():
+        # Hybrid: these rows take the prior's latent, as at test time
+        prior_rows = None
+        if self.training and self.config.hybrid:
+            prior_rows = torch.arange(z_H.shape[0], device=z_H.device) < round(self.config.prior_rows * z_H.shape[0])
+        # H_cycles-1 without grad (with grad if grad_all_transitions, in training)
+        full_grad = self.config.grad_all_transitions and self.training
+        with contextlib.nullcontext() if full_grad else torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
                 for _L_step in range(self.config.L_cycles):
                     z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
@@ -554,6 +569,8 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
                     else:
                         y_tar = F.one_hot(batch["labels"].long().clamp_min(0), num_classes=self.config.vocab_size).to(torch.float32)  # Ignored labels (-100) read as token 0
                     z, _, _ = self.variational.sample_posterior(h_t, y_tar)
+                    if prior_rows is not None and prior_rows.any():
+                        z = torch.where(prior_rows.view(-1, 1, 1), self._prior_latent(h_t, carry)[0], z)
                 else:
                     z, _, _ = self._prior_latent(h_t, carry)
                 # Decode: condition h_t on z (per-token z)
@@ -591,6 +608,9 @@ class GenerativeRecursiveReasoningModelInner(nn.Module):
             vae_outputs['post_mu'] = post_mu
             vae_outputs['post_logvar'] = post_logvar
             z = z_post
+            if prior_rows is not None:
+                z = torch.where(prior_rows.view(-1, 1, 1), z_pred, z_post)
+                vae_outputs['prior_rows'] = prior_rows
         else:
             z = z_pred
 
@@ -634,6 +654,9 @@ class GenerativeRecursiveReasoningModel(nn.Module):
         assert self.config.latent_scope == "token" or (self.config.train_latent == "prior" and self.config.prior_noise == "standard"), \
             "latent_scope=sample or none needs train_latent=prior and prior_noise=standard"
         assert self.config.recursion in ("trm", "strm"), f"recursion must be trm or strm, got {self.config.recursion}"
+        assert not self.config.hybrid or (self.config.train_latent == "posterior" and self.config.recursion == "trm"
+                                          and self.config.latent_scope == "token" and not self.config.use_patchify), \
+            "hybrid needs train_latent=posterior on the trm recursion with per-token latents"
         assert self.config.strm_init in ("fixed", "sample"), f"strm_init must be fixed or sample, got {self.config.strm_init}"
         if self.config.recursion == "strm":
             assert self.config.latent_scope in ("none", "sample"), "strm supports latent_scope none or sample"
@@ -667,6 +690,14 @@ class GenerativeRecursiveReasoningModel(nn.Module):
         new_steps = torch.where(carry.halted, 0, carry.steps)
 
         new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
+
+        # Hybrid: a new input's target is one of its stored solutions at random, as GRAM's one random stored
+        # solution per input each epoch
+        if self.training and self.config.hybrid:
+            label_set = new_current_data["label_set"]
+            pick = torch.multinomial((label_set != IGNORE_LABEL_ID).any(-1).float(), 1).squeeze(-1)
+            fresh = label_set[torch.arange(label_set.shape[0], device=label_set.device), pick].to(new_current_data["labels"].dtype)
+            new_current_data["labels"] = torch.where(carry.halted.view(-1, 1), fresh, new_current_data["labels"])
 
         # Forward inner model
         new_inner_carry, logits, (q_halt_logits, q_continue_logits), vae_outputs, value_pred = self.inner(new_inner_carry, new_current_data)

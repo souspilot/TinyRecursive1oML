@@ -8,7 +8,7 @@ Rules for the paper: it uses only the terms defined here, and a reader with gene
 should be able to follow it with this glossary at hand. Terms marked **[coined]** are ours, not from the literature:
 each was agreed with the authors and must be motivated in the paper where it first appears. A new term needs the
 same agreement before it is used. The main report (paper.tex) tells only the presentation story; every other run
-(N-Queens, the $K$ sweep, second seeds, STRM, other sources of randomness, 3-SAT) is in the extra-results document
+(N-Queens, the $K$ sweep, second seeds, STRM, other sources of randomness) is in the extra-results document
 (extra_results.tex), the future appendix. The main text reports one seed or the mean over seeds.
 
 Symbols: $x$ input, $y$ answer, $h$ / $l$ high-level / low-level state, $\epsilon$ stochastic guidance, $T$ transitions
