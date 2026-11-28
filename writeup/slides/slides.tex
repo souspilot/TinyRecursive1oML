@@ -63,6 +63,18 @@
 \newcommand{\bok}{best-of-$K$}
 \newcommand{\Bok}{Best-of-$K$}
 
+\usetikzlibrary{positioning,arrows.meta,calc}
+
+\graphicspath{{figs/}}
+\newcommand{\mazegrid}[1]{%
+  \begin{tikzpicture}[scale=0.40]
+    \foreach \c/\r in {#1} \fill[navy!30] (\c,-\r) rectangle ++(1,-1);
+    \draw[step=1,gray!60,thin] (0,-4) grid (4,0);
+    \draw[navy,thick] (0,-4) rectangle (4,0);
+    \node[font=\tiny\bfseries] at (0.5,-0.5) {S};
+    \node[font=\tiny\bfseries] at (3.5,-3.5) {G};
+  \end{tikzpicture}}
+
 \title{\textbf{Recursive Reasoning on Puzzles with Many Solutions}\\[0.25em]
 \large The Validity-Diversity Trade-off}
 \subtitle{AIL8022: Reasoning and Thinking Models}
@@ -78,6 +90,71 @@
 \end{frame}
 
 % SLIDE 2: Motivation & Overview
+
+% SLIDE 2a: The problem
+\begin{frame}{The Problem-Many Puzzles Have More Than One Solution}
+  \begin{columns}[T]
+    \column{0.54\textwidth}
+    \small
+    \begin{itemize}\setlength{\itemsep}{0.4em}
+      \item A Sudoku with few clues, a maze with loops or a logic puzzle with a missing number has many solutions.
+      \item A model for such puzzles should do two things:
+      \begin{itemize}\setlength{\itemsep}{0.15em}
+        \item \textbf{Validity:} every answer it gives is a correct solution.
+        \item \textbf{Diversity:} over many samples, it gives many \emph{different} correct solutions.
+      \end{itemize}
+      \item Diversity makes test-time compute useful: voting, best-of-$n$ with a checker, and meeting a requirement
+      unknown at training time all need distinct valid candidates.
+    \end{itemize}
+    \column{0.42\textwidth}
+    \centering
+    \vspace{0.6em}
+    \begin{tabular}{@{}ccc@{}}
+      \mazegrid{0/0,1/0,2/0,3/0,3/1,3/2,3/3} &
+      \mazegrid{0/0,0/1,0/2,0/3,1/3,2/3,3/3} &
+      \mazegrid{0/0,1/0,2/0,1/3,2/3,3/3} \\[2pt]
+      \scriptsize Solution 1 & \scriptsize Solution 2 & \scriptsize Blend: \textcolor{accentred}{\textbf{invalid}}
+    \end{tabular}\\[0.8em]
+    \raggedright\footnotesize A \emph{blended} answer: every cell agrees with some solution, but the whole answer
+    matches none.
+  \end{columns}
+  \note{Two shortest paths from S to G. A model that cannot commit to one of them outputs a blend: half of each path, which is not a path. Validity and diversity are measured separately throughout the talk.}
+\end{frame}
+
+% SLIDE 2b: HRM and TRM architectures
+\begin{frame}{HRM and TRM: Deterministic Recursive Reasoners}
+  \begin{columns}[T]
+    \column{0.49\textwidth}
+    \textbf{HRM}~\cite{wang2025}\\[0.3em]
+    \includegraphics[width=\linewidth]{hrm_arch.png}
+    \begin{itemize}\setlength{\itemsep}{0.2em}\scriptsize
+      \item Two recurrent modules: a fast low-level \textbf{L} module, and a slow high-level \textbf{H} module that
+      updates once the L module has taken several steps.
+      \item One-step gradient: only the last L and H updates get gradients (\textcolor{accentblue}{blue}), so
+      memory is $O(1)$, with no backpropagation through time.
+      \item 27M parameters, about 1,000 training examples: Sudoku-Extreme 55.0\%, Maze-Hard 74.5\%.
+    \end{itemize}
+    \column{0.49\textwidth}
+    \textbf{TRM}~\cite{jolicoeur2025}\\[0.3em]
+    \begin{minipage}[t]{0.38\linewidth}
+      \vspace{0pt}\centering
+      \includegraphics[height=0.66\textheight,keepaspectratio]{trm_arch.png}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.60\linewidth}
+      \vspace{0pt}
+      \begin{itemize}\setlength{\itemsep}{0.2em}\scriptsize
+        \item \textbf{One tiny network} updates a latent $z$ $n$ times from $(x, y, z)$, then the answer $y$ from
+        $(y, z)$.
+        \item Repeated for up to $N_{\text{sup}}=16$ supervision steps.
+        \item Backpropagates through a full recursion, instead of HRM's one-step gradient.
+        \item 5M / 7M parameters: Sudoku-Extreme 87.4\%, Maze-Hard 85.3\%.
+      \end{itemize}
+      \vspace{0.6em}
+      \raggedright\small Both are \textbf{deterministic}: one input $\to$ one answer.
+    \end{minipage}
+  \end{columns}
+  \note{Left: HRM unrolled over time. Black modules run without gradients; only the final L and H steps (blue) are trained, which is HRM's one-step gradient approximation. Right: TRM merges the two modules into one network that alternates between improving the latent z and the answer y. The figure shows a 4-layer block; the paper's best model uses 2 layers (Sec. 4.4). Neither model can return a second answer for the same input, which is what GRAM adds.}
+\end{frame}
 \begin{frame}{Motivation: Beyond Deterministic Recursive Reasoning}
   \small
   \begin{itemize}\setlength{\itemsep}{0.3em}
@@ -95,7 +172,44 @@
       \end{enumerate}
   \end{itemize}
 \end{frame}
-
+% SLIDE 2d: GRAM  (fixed coordinates: needs no TikZ libraries)
+\begin{frame}{GRAM: Stochastic Guidance with a Prior and a Posterior}
+  \begin{columns}[T]
+    \column{0.6\textwidth}
+    \centering
+    \vspace{0.6em}
+    \begin{tikzpicture}[x=1cm,y=1cm,
+      n/.style={draw=navy,rounded corners=2pt,font=\scriptsize,inner sep=4pt,fill=white},
+      arr/.style={-stealth,thick,slate}]
+    \node[n] (h0) at (0,0) {$h_{t-1}$};
+    \node[n,align=center] (f) at (2.45,0) {transition $f_\theta$\\\tiny 4 low-level + 1 high-level update};
+    \node[n] (u) at (4.75,0) {$u_t$};
+    \node[draw=navy,circle,inner sep=1pt] (plus) at (5.6,0) {$+$};
+    \node[n] (h1) at (6.5,0) {$h_t$};
+    \node[n,fill=accentblue!12,draw=accentblue] (eps) at (5.6,-1.3) {$\epsilon_t$};
+    \node[n,align=center,fill=navy!8,draw=navy] (q) at (4.25,-2.75)
+      {\textbf{training}: posterior\\$q_\phi(\epsilon_t\mid u_t, y)$\\\tiny sees the target $y$};
+    \node[n,align=center,fill=accentblue!10,draw=accentblue] (p) at (6.75,-2.75)
+      {\textbf{test}: prior\\$p_\theta(\epsilon_t\mid u_t)$\\\tiny no target};
+    \draw[arr] (h0) -- (f); \draw[arr] (f) -- (u); \draw[arr] (u) -- (plus); \draw[arr] (plus) -- (h1);
+    \draw[arr] (eps) -- (plus); \draw[arr] (q) -- (eps); \draw[arr] (p) -- (eps);
+    \end{tikzpicture}\\[0.8em]
+    \small $\mathcal{L} = \mathrm{CE}(\hat y, y) \;+\; \beta\,\mathrm{KL}\big(q_\phi \,\|\, p_\theta\big)$
+    \column{0.37\textwidth}
+    \small
+    \vspace{0.6em}
+    One KL weight $\beta$ decides how much the guidance carries:
+    \begin{itemize}\setlength{\itemsep}{0.3em}
+      \item \textbf{$\beta$ too low:} the posterior passes the answer through $\epsilon_t$; the prior cannot produce
+      it, so test samples fail.
+      \item \textbf{$\beta$ too high:} $\epsilon_t$ carries nothing, and every sample is the same.
+    \end{itemize}
+    \vspace{0.6em}
+    \footnotesize\textbf{Reported}~\cite{baek2026}: on $10\times10$ N-Queens, single-sample accuracy is 37.8\% for
+    HRM, 17.5\% for TRM and \textbf{89.7\%} for GRAM.
+  \end{columns}
+  \note{The posterior sees the answer during training; at test time only the prior is available. Beta ties them together. Both failure modes come back in Q1.}
+\end{frame}
 
 % SLIDE 3: Benchmarks
 
@@ -157,6 +271,56 @@
 \end{frame}
 
 
+% FRAME 1: how best-of-K trains
+% ---------------------------------------------------------------------
+\begin{frame}{How \Bok{} Trains: $K=8$ Rollouts, One Gradient}
+  \small Each input is copied $K=8$ times, each copy with its own random guidance $\epsilon_j\sim\mathcal{N}(0,I)$.
+  The loss keeps only the rollout closest to a stored solution:
+  \quad $\mathcal{L}=\min_{j\le K}\,\min_{s\in S(x)}\,\ell(\hat y_j, s)$
+
+  \vspace{0.4em}
+  \centering
+  \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,scale=0.92,every node/.style={transform shape}]
+    % column headers
+    \node[font=\scriptsize\bfseries,text=slate] at (1.75,2.75) {8 random draws};
+    \node[font=\scriptsize\bfseries,text=slate] at (6.2,2.75) {8 answers};
+    \node[font=\scriptsize\bfseries,text=slate] at (9.6,2.75) {stored solutions $S(x)$};
+    % input
+    \node[draw=navy,rounded corners=2pt,fill=softbg,minimum width=1.1cm,minimum height=0.8cm,align=center]
+      at (0,0) {input\\$x$};
+    % shared network
+    \node[draw=navy,rounded corners=3pt,fill=softbg,minimum width=2.4cm,minimum height=5.0cm,align=center,
+      font=\scriptsize] at (4.0,0) {\textbf{same network}\\(shared weights)\\[6pt]recursion over\\16 supervision\\steps};
+    % rollouts
+    \foreach \j/\y in {1/2.1,2/1.5,3/0.9,4/0.3,5/-0.3,6/-0.9,7/-1.5,8/-2.1} {
+      \draw[gray!55] (0.55,0) -- (1.45,\y);
+      \node[font=\scriptsize,text=slate] at (1.75,\y) {$\epsilon_{\j}$};
+      \draw[gray!55,-stealth] (2.05,\y) -- (2.8,\y);
+      \draw[gray!55,-stealth] (5.2,\y) -- (5.95,\y);
+      \node[circle,draw=gray!70,fill=white,inner sep=0pt,minimum size=0.46cm,font=\tiny] (y\j) at (6.2,\y) {$\hat y_{\j}$};
+    }
+    % stored solutions
+    \foreach \k/\y in {1/1.2,2/0,3/-1.2}
+      \node[draw=slate,thick,fill=white,minimum size=0.55cm,font=\scriptsize] (s\k) at (9.6,\y) {$s_{\k}$};
+    % each answer's nearest stored solution (thin)
+    \foreach \j/\k in {1/1,2/1,4/1,5/2,6/1,7/2,8/3}
+      \draw[gray!45] (y\j.east) -- (s\k.west);
+    % the closest pair: the only rollout that gets a gradient
+    \draw[navy,line width=1.3pt] (2.05,0.9) -- (2.8,0.9);
+    \draw[navy,line width=1.3pt] (5.2,0.9) -- (5.95,0.9);
+    \node[circle,draw=navy,fill=navy,text=white,inner sep=0pt,minimum size=0.46cm,font=\tiny] at (6.2,0.9) {$\hat y_{3}$};
+    \draw[navy,line width=1.4pt,-stealth] (6.45,0.9) -- (9.3,1.17);
+    \node[font=\scriptsize,text=navy,align=center] at (7.85,1.75) {closest pair:\\\textbf{trained}};
+    \node[font=\scriptsize,text=gray,align=center] at (9.6,-2.1) {other 7 rollouts:\\\textbf{no gradient}};
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  \raggedright\footnotesize
+  \begin{itemize}\setlength{\itemsep}{0.15em}
+    \item One optimiser step holds 96 inputs $\times$ 8 rollouts $=$ 768 sequences (GRAM and MinLoss: 768 inputs).
+    \item At test time every sample draws fresh guidance, so different draws can land on different solutions.
+  \end{itemize}
+\end{frame}
 % SLIDE 5: Evaluation Protocol & Metrics
 
 \begin{frame}{Evaluation Protocol \& Metrics}
@@ -201,7 +365,65 @@
     \end{itemize}
 \end{frame}
 
+% SLIDE 6: Q1 - Choosing Beta (visual version; the table moved to a backup slide after References)
+\begin{frame}{Q1: How Should GRAM's $\beta$ Be Chosen for a New Task?}
+  \textbf{Answer:} $\beta$ works only in a narrow, task-specific band.
 
+  \vspace{0.3em}
+  \centering
+  \begin{tikzpicture}
+    \begin{groupplot}[
+      group style={group size=5 by 1, horizontal sep=0.3cm, yticklabels at=edge left},
+      width=3.75cm, height=3.9cm, xmin=-0.45, xmax=2.45, ymin=0, ymax=105,
+      xtick={0,1,2}, xticklabels={$\frac{1}{2}$,1,2}, ytick={0,25,50,75,100},
+      tick label style={font=\scriptsize}, title style={font=\small\bfseries,text=navy,yshift=-2pt,text height=1.6ex,text depth=0.3ex},
+      ymajorgrids, major grid style={gray!20}, axis x line*=bottom, axis y line*=left]
+      % ---------------- Sudoku
+      \nextgroupplot[title={Sudoku}, ylabel={\scriptsize \%}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color={rgb,255:red,29;green,99;blue,184},thick,mark=*,mark size=1.6pt] coordinates {(0,53.6) (1,92.5) (2,35.4)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,79.8) (1,97.6) (2,98.3)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.2pt] coordinates {(0,37) (1,87) (2,1)};
+      % ---------------- Graph colouring
+      \nextgroupplot[title={Graph col.}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color={rgb,255:red,29;green,99;blue,184},thick,mark=*,mark size=1.6pt] coordinates {(0,71.5) (1,97.0) (2,86.5)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,93.4) (1,97.4) (2,100.0)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.2pt] coordinates {(0,64) (1,93) (2,5)};
+      % ---------------- Maze (best beta is half the reference)
+      \nextgroupplot[title={Maze}, xlabel={\scriptsize $\times$ reference $\beta$},
+        legend style={font=\scriptsize,draw=none,fill=none,at={(0.5,-0.36)},anchor=north,legend columns=3,
+          /tikz/every even column/.append style={column sep=12pt}}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(-0.45,0) (0.45,0) (0.45,105) (-0.45,105)} -- cycle;
+        \addplot[color={rgb,255:red,29;green,99;blue,184},thick,mark=*,mark size=1.6pt] coordinates {(0,67.3) (1,35.9) (2,33.8)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,48.2) (1,97.8) (2,98.6)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.2pt] coordinates {(0,81) (1,2) (2,0)};
+        \legend{Validity, Unique-solution validity, Distinct@100 (\% of a uniform sampler)}
+      % ---------------- Heyawake
+      \nextgroupplot[title={Heyawake}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color={rgb,255:red,29;green,99;blue,184},thick,mark=*,mark size=1.6pt] coordinates {(0,2.2) (1,78.7) (2,61.0)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,1.6) (1,72.0) (2,95.2)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.2pt] coordinates {(0,4) (1,84) (2,1)};
+      % ---------------- Nurikabe
+      \nextgroupplot[title={Nurikabe}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color={rgb,255:red,29;green,99;blue,184},thick,mark=*,mark size=1.6pt] coordinates {(0,0.1) (1,82.0) (2,54.3)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,0.0) (1,83.9) (2,88.2)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.2pt] coordinates {(0,0) (1,77) (2,1)};
+    \end{groupplot}
+  \end{tikzpicture}
+
+  \vspace{0.1em}
+  \raggedright\footnotesize
+  \begin{itemize}\setlength{\itemsep}{0.1em}
+    \item \textbf{Too high ($2\times$): collapse.} Unique-solution validity stays 88--100\%, but distinct@100 falls to
+    0--5\% of a uniform sampler.
+    \item \textbf{Too low ($\frac{1}{2}\times$): prior-posterior mismatch.} Unique-solution validity falls (Sudoku
+    79.8\%, Heyawake 1.6\%, Nurikabe 0.0\%). Maze is the exception: its best $\beta$ is half the reference.
+  \end{itemize}
+  {\scriptsize\color{slate} Shaded: best $\beta$ per task. Reference $\beta = 4.5/\text{answer cells}$. Validation run summaries.\par}
+\end{frame}
 % SLIDE 7: Q2 - Is a Target-Seeing Posterior Needed?
 
 \begin{frame}{Q2: Is a Posterior That Sees the Target Needed?}
@@ -390,6 +612,75 @@
   \end{itemize}
 \end{frame}
 
+\begin{frame}{Which Rollouts Get Trained? Four Objectives}
+  \centering
+  \begin{tikzpicture}[x=1cm,y=0.8cm,font=\scriptsize]
+    % ---------- panel 1: MinLoss ----------
+    \begin{scope}[xshift=0cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.75) {MinLoss ($K=1$)};
+      \node[text=slate,align=center,text width=3.1cm] at (0.95,2.25) {one rollout, trained to its closest};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (a\k) at (1.9,\y) {$s_{\k}$};
+      \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.3cm] (ar) at (0,0.25) {};
+      \draw[navy,line width=1.1pt,-stealth] (ar) -- (a1.west);
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.5 / 2.5};
+    \end{scope}
+    % ---------- panel 2: best-of-K ----------
+    \begin{scope}[xshift=3.45cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.75) {\Bok{} ($K=8$)};
+      \node[text=slate,align=center,text width=3.3cm] at (0.95,2.25) {only the closest\\pair is trained};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (b\k) at (1.9,\y) {$s_{\k}$};
+      \foreach \j/\y in {1/1.75,2/1.25,4/0.25,5/-0.25,6/-0.75,7/-1.25,8/-1.75}
+        \node[circle,draw=gray!60,fill=white,inner sep=0pt,minimum size=0.3cm] at (0,\y) {};
+      \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.3cm] (br) at (0,0.75) {};
+      \draw[navy,line width=1.1pt,-stealth] (br) -- (b1.west);
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.2 / \textbf{10.4}};
+    \end{scope}
+    % ---------- panel 3: nearest ----------
+    \begin{scope}[xshift=6.9cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.75) {Nearest};
+      \node[text=slate,align=center,text width=3.1cm] at (0.95,2.25) {every rollout trained to its own closest};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (c\k) at (1.9,\y) {$s_{\k}$};
+      \foreach \j/\y/\k in {1/1.75/1,2/1.25/1,3/0.75/1,4/0.25/1,5/-0.25/2,6/-0.75/1,7/-1.25/2,8/-1.75/3} {
+        \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.3cm] (c\j r) at (0,\y) {};
+        \draw[navy,line width=0.8pt,-stealth] (c\j r) -- (c\k.west);
+      }
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.3 / 4.6};
+    \end{scope}
+    % ---------- panel 4: balanced ----------
+    \begin{scope}[xshift=10.35cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.75) {Balanced};
+      \node[text=slate,align=center,text width=3.1cm] at (0.95,2.25) {at most $\lceil 8/3\rceil=3$ rollouts per solution};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (d\k) at (1.9,\y) {$s_{\k}$};
+      \foreach \j/\y/\k in {1/1.75/1,2/1.25/1,3/0.75/1,5/-0.25/2,7/-1.25/2,8/-1.75/3} {
+        \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.3cm] (d\j r) at (0,\y) {};
+        \draw[navy,line width=0.8pt,-stealth] (d\j r) -- (d\k.west);
+      }
+      \foreach \j/\y/\k in {4/0.25/3,6/-0.75/2} {
+        \node[circle,draw=accentamber,fill=accentamber,inner sep=0pt,minimum size=0.3cm] (d\j r) at (0,\y) {};
+        \draw[accentamber,line width=0.8pt,dashed,-stealth] (d\j r) -- (d\k.west);
+      }
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.2 / 3.3};
+    \end{scope}
+    % ---------- legend ----------
+    \begin{scope}[yshift=-3.25cm]
+      \draw[navy,line width=1pt,-stealth] (0.4,0) -- (1.1,0); \node[anchor=west] at (1.15,0) {trained towards};
+      \draw[accentamber,line width=1pt,dashed,-stealth] (3.6,0) -- (4.3,0);
+      \node[anchor=west] at (4.35,0) {sent to another solution (weight 0.3)};
+      \node[circle,draw=gray!60,fill=white,inner sep=0pt,minimum size=0.3cm] at (9.05,0) {};
+      \node[anchor=west] at (9.25,0) {untrained rollout};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.2em}
+  \raggedright\footnotesize
+  Sudoku: validity / distinct@100, run summaries. Training every rollout \emph{lowers} diversity to MinLoss's level,
+  even when Balanced forces rollouts apart. Our explanation, not tested directly: \bok{}'s diversity comes from the 7
+  rollouts it leaves untrained.
+\end{frame}
 
 % SLIDE 13: Idea 4 - Hybrid GRAM
 

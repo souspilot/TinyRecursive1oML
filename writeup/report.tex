@@ -1,0 +1,912 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,calc}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepgfplotslibrary{groupplots}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+\setlength{\emergencystretch}{1.5em}
+
+% Palette matching the presentation figures
+\definecolor{navy}{RGB}{22, 48, 92}
+\definecolor{slate}{RGB}{75, 85, 105}
+\definecolor{accentblue}{RGB}{29, 99, 184}
+\definecolor{accentred}{RGB}{185, 45, 45}
+\definecolor{accentamber}{RGB}{196, 108, 12}
+\definecolor{accentgreen}{RGB}{28, 125, 72}
+\definecolor{softbg}{RGB}{244, 246, 250}
+
+% Helpers matching README conventions
+\newcommand{\secbest}[1]{\underline{#1}}
+\newcommand{\bok}{best-of-$K$}
+\newcommand{\Bok}{Best-of-$K$}
+\newcommand{\verdictpartial}{\textcolor{accentamber}{\textbf{Partial success}}}
+\newcommand{\verdictfail}{\textcolor{accentred}{\textbf{Failure}}}
+
+\newcommand{\mazegrid}[1]{%
+  \begin{tikzpicture}[scale=0.42]
+    \foreach \c/\r in {#1} \fill[navy!30] (\c,-\r) rectangle ++(1,-1);
+    \draw[step=1,gray!60,thin] (0,-4) grid (4,0);
+    \draw[navy,thick] (0,-4) rectangle (4,0);
+    \node[font=\scriptsize\bfseries] at (0.5,-0.5) {S};
+    \node[font=\scriptsize\bfseries] at (3.5,-3.5) {G};
+  \end{tikzpicture}}
+
+\title{\textbf{Recursive Reasoning on Puzzles with Many Solutions:\\The Validity--Diversity Trade-off}\\[6pt]
+\large AIL8022 (Reasoning and Thinking Models) --- Final Project Report}
+\author{Harshit Bisht (2025AIZ8455) \quad Ashwendh Chowdhary (2026AIY7513)\\[2pt]
+\small Indian Institute of Technology Delhi}
+\date{November 28, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Many constraint-satisfaction puzzles admit more than one valid solution, and a generative reasoner should satisfy two properties on them: \emph{validity} (each sampled answer satisfies every constraint) and \emph{diversity} (repeated samples cover many distinct valid solutions). Generative Recursive Reasoning Models (GRAM)~\cite{baek2026} extend deterministic tiny recursive reasoners by adding random stochastic guidance at every transition, drawn during training from a posterior that sees the target solution and at test time from a learned prior regularised with KL weight $\beta$. In this project, we build five multi-solution benchmarks whose solution sets are counted exactly---three generated tasks (Sudoku, mazes, graph colouring) and two tasks constructed by loosening human-made puzzles from Pencil Puzzle Bench (heyawake and nurikabe)---and evaluate GRAM against simpler posterior-free baselines (\bok{} and MinLoss) on the exact same recursive network at matched training compute. Across all five tasks, we find a strict validity--diversity trade-off: GRAM produces the most distinct valid solutions on every task, MinLoss or \bok{} achieves the highest validity on every task, and GRAM's diversity costs between 0.9 and 22 percentage points of validity on the test split. Furthermore, GRAM's $\beta$ works only in a narrow, task-specific band, whereas all models generate solutions absent from their training targets at the rate of a uniform sampler. We then investigate five architectural and training interventions to obtain both high validity and high diversity in a single model. Adding test-time, persistent, or trained randomness plateaus below GRAM's diversity; training every rollout or mixing prior-trained MinLoss rows into GRAM causes diversity to collapse to MinLoss's level; and backpropagating gradients through all transitions of each supervision step yields the first training improvement to \bok{}'s frontier on generated and human-made puzzles, though with training instability on graph colouring.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Introduction and Background}
+\label{sec:intro}
+% =============================================================================
+
+A Sudoku grid with few clues, a maze containing loops, or a pencil puzzle with a missing numeric constraint has many valid solutions. When evaluating a reasoning model on problems with multiple correct answers, single-sample accuracy is no longer sufficient. Instead, a capable model must do two distinct things:
+\begin{enumerate}
+  \item \textbf{Validity:} every answer it outputs must satisfy all constraints of the problem, committing coherently to a single valid solution rather than outputting an invalid ``blend'' of several solutions (Figure~\ref{fig:blend}).
+  \item \textbf{Diversity:} across repeated independent samples for the same input, it should return many \emph{different} valid solutions. Diversity is what makes test-time scaling useful: majority voting, best-of-$n$ filtering with an external verifier, and downstream selection under constraints unknown during training all depend on drawing distinct valid candidates.
+\end{enumerate}
+
+\begin{figure}[!ht]
+  \centering
+  \begin{tabular}{@{}ccc@{}}
+    \mazegrid{0/0,1/0,2/0,3/0,3/1,3/2,3/3} &
+    \hspace{1.2em}\mazegrid{0/0,0/1,0/2,0/3,1/3,2/3,3/3}\hspace{1.2em} &
+    \mazegrid{0/0,1/0,2/0,1/3,2/3,3/3} \\[3pt]
+    \small Solution 1 (valid) & \small Solution 2 (valid) & \small Blended answer (\textcolor{accentred}{\textbf{invalid}})
+  \end{tabular}
+  \caption{Two shortest paths from start (\textbf{S}) to goal (\textbf{G}) on a $4\times 4$ grid. A model trained on multiple solutions without a mechanism to commit to one per sample averages across targets and produces a disconnected blend, where every cell agrees with at least one valid solution but the complete grid satisfies none.}
+  \label{fig:blend}
+\end{figure}
+
+\paragraph{From deterministic to generative recursive reasoners.}
+Tiny recursive reasoning architectures such as the Hierarchical Reasoning Model (HRM)~\cite{wang2025} and Tiny Recursive Model (TRM)~\cite{jolicoeur2025} solve difficult combinatorial puzzles by repeatedly applying a compact transformer block to latent hidden states across many refinement steps. Despite strong accuracy on unique-solution benchmarks, both HRM and TRM follow a deterministic hidden-state trajectory: given an input $x$, they always produce the same output.
+
+GRAM~\cite{baek2026} makes this recursive computation generative by adding \emph{stochastic guidance}---a random vector $\epsilon_t$---to the high-level state at every latent transition (Figure~\ref{fig:gram_arch}). Following the conditional variational autoencoder framework~\cite{sohn2015}, GRAM draws $\epsilon_t$ during training from a learned \emph{posterior} $q_\phi(\epsilon_t \mid u_t, y)$ that conditions on both the deterministic state update $u_t$ and the target solution $y$. At test time, where $y$ is unavailable, $\epsilon_t$ is drawn from a learned \emph{prior} $p_\theta(\epsilon_t \mid u_t)$, which is trained alongside the posterior via a Kullback--Leibler (KL) penalty weighted by $\beta$.
+
+\begin{figure}[!ht]
+  \centering
+  \begin{tikzpicture}[x=1.12cm,y=0.95cm,
+    n/.style={draw=navy,rounded corners=2pt,font=\footnotesize,inner sep=4.5pt,fill=white},
+    arr/.style={-stealth,thick,slate}]
+    \node[n] (h0) at (0,0) {$h_{t-1}$};
+    \node[n,align=center] (f) at (2.55,0) {transition $f_\theta$\\\scriptsize 4 low-level + 1 high-level update};
+    \node[n] (u) at (5.0,0) {$u_t$};
+    \node[draw=navy,circle,inner sep=1.2pt] (plus) at (5.95,0) {$+$};
+    \node[n] (h1) at (6.95,0) {$h_t$};
+    \node[n,fill=accentblue!12,draw=accentblue] (eps) at (5.95,-1.35) {$\epsilon_t$};
+    \node[n,align=center,fill=navy!6,draw=navy] (q) at (3.95,-2.85)
+      {\textbf{training}: posterior $q_\phi(\epsilon_t\mid u_t, y)$\\\scriptsize sees target $y$};
+    \node[n,align=center,fill=accentblue!8,draw=accentblue] (p) at (7.85,-2.85)
+      {\textbf{test}: prior $p_\theta(\epsilon_t\mid u_t)$\\\scriptsize no target};
+    \draw[arr] (h0) -- (f); \draw[arr] (f) -- (u); \draw[arr] (u) -- (plus); \draw[arr] (plus) -- (h1);
+    \draw[arr] (eps) -- (plus); \draw[arr] (q) -- (eps); \draw[arr] (p) -- (eps);
+  \end{tikzpicture}
+  \caption{One latent transition in GRAM~\cite{baek2026}. During training, stochastic guidance $\epsilon_t$ is sampled from a target-conditioned posterior $q_\phi$; at test time it is sampled from a learned prior $p_\theta$. A single scalar hyperparameter $\beta$ weights $\mathrm{KL}(q_\phi \,\|\, p_\theta)$ in the training loss.}
+  \label{fig:gram_arch}
+\end{figure}
+
+\paragraph{Project goals and structure.}
+Because GRAM relies on variational training with a target-seeing posterior and task-specific KL tuning, we set out to stress-test its behaviour across diverse multi-solution tasks and ask whether simpler posterior-free training objectives on the exact same recursive network can match or surpass it. (Concurrent preprints have also begun exploring energy-based reasoners~\cite{chen2026,hoover2026}; we discuss them as future comparisons in Section~\ref{sec:future}.)
+
+Our study proceeds in two parts:
+\begin{itemize}
+  \item \textbf{Part I --- Baseline Study (Section~\ref{sec:baseline}):} Using five controlled multi-solution benchmarks (Section~\ref{sec:datasets}) and two posterior-free baselines, \Bok{}~\cite{guzman2012,bhattacharyya2018} and MinLoss~\cite{nandwani2021} (Section~\ref{sec:models}), we answer three foundational questions:
+    \begin{itemize}
+      \item[\textbf{Q1:}] How should GRAM's KL weight $\beta$ be chosen for a new task, and how does it fail outside that range?
+      \item[\textbf{Q2:}] Is a posterior that sees the target during training needed for validity or for diversity?
+      \item[\textbf{Q3:}] When only a small subset of solutions per puzzle is stored for training, do these models generate the remaining \emph{unseen} solutions?
+    \end{itemize}
+  \item \textbf{Part II --- Closing the Validity--Diversity Gap (Section~\ref{sec:ideas}):} Part I reveals a sharp trade-off: GRAM is consistently the most diverse model, whereas posterior-free baselines are consistently the most valid. We therefore test five targeted ideas---test-time state noise, persistent and trained randomness, training every rollout under nearest and balanced assignments, a hybrid prior/posterior GRAM objective, and unrolling gradients through all transitions of each supervision step---to understand what prevents a single model from achieving both.
+\end{itemize}
+
+% =============================================================================
+\section{Benchmarks and Dataset Construction}
+\label{sec:datasets}
+% =============================================================================
+
+To evaluate validity, solution coverage, and generalisation to held-out solutions without approximation error, every benchmark in our study has its solution counts enumerated exactly. We primarily use five tasks---three procedurally generated and two derived from human-crafted logic puzzles---summarised in Table~\ref{tab:datasets}. Earlier exploratory experiments were also conducted on $10\times 10$ N-Queens (1--3 queens given; recorded in \texttt{writeup/icml2027/extra\_results.pdf}).
+
+\begin{table}[!ht]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}llllll@{}}
+    \toprule
+    \textbf{Task} & \textbf{\texttt{<task>}} & \textbf{Input} & \textbf{Solutions / input} & \textbf{Source} & \textbf{Builder (\texttt{dataset/})} \\
+    \midrule
+    Sudoku & \texttt{sudoku} & $9\times 9$ grid, 26--50 clues & 1--1024 & Generated & \texttt{build\_sudoku\_multi\_dataset.py} \\
+    Maze & \texttt{maze} & $15\times 15$ grid & 1--924 shortest paths & Generated & \texttt{build\_maze\_dataset.py} \\
+    Graph colouring & \texttt{graph} & 10 nodes, 3 colours & 1--9842 & Generated & \texttt{build\_graph\_coloring\_multi\_dataset.py} \\
+    Heyawake & \texttt{heyawake} & $10\times 10$ grid & 1--1023 & Human-made (PPBench) & \texttt{build\_heyawake\_multi\_dataset.py} \\
+    Nurikabe & \texttt{nurikabe} & $10\times 10$ grid & 1--1023 & Human-made (PPBench) & \texttt{build\_nurikabe\_multi\_dataset.py} \\
+    \midrule
+    N-Queens (extra) & \texttt{nqueens} & $10\times 10$, 1--3 given & 1--16 (stored) & Generated & \texttt{build\_nqueens\_dataset.py} \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Summary of benchmarks. Every main task contains 100,000 training, 1,000 validation, and 2,000 test inputs, with no input shared across splits.}
+  \label{tab:datasets}
+\end{table}
+
+\subsection{Common Design Principles}
+All five main benchmarks follow three shared construction rules (implemented in \path{dataset/multi_solution.py} and built via \path{scripts/build_multi_datasets.sh}):
+\begin{enumerate}
+  \item \textbf{Disjoint splits of matched size:} Every task has 100,000 training inputs, 1,000 validation inputs, and 2,000 test inputs, with zero overlap across splits.
+  \item \textbf{Balanced solution-count distribution:} Natural puzzle generators heavily skew toward either unique solutions or unconstrained boards. We instead balance inputs across explicit solution-count groups: unique (\texttt{1}), \texttt{2--3}, \texttt{4--15}, \texttt{16--63}, \texttt{64--255}, and \texttt{256+} solutions. Including a substantial share of unique-solution inputs lets us isolate pure solving failures from multi-solution selection failures.
+  \item \textbf{Stored solutions vs.\ unseen solutions:} Although an input can have hundreds or thousands of valid solutions, at most \textbf{16 solutions} are saved in the training data (\emph{stored solutions}). On inputs with more than 16 valid solutions, all remaining valid solutions are \emph{unseen solutions}, allowing us to test whether trained models merely replay memorised targets or generalise across the true solution set.
+\end{enumerate}
+
+\subsection{Task Descriptions}
+\paragraph{Generated tasks.}
+\begin{itemize}
+  \item \textbf{Sudoku:} Random completed $9\times 9$ grids with 26 to 50 clues retained at random positions; fewer clues admit more completions. Exact solution sets are enumerated via a bitmask solver, discarding boards with more than 1024 solutions.
+  \item \textbf{Maze:} $15\times 15$ grid mazes on a room lattice with inner walls randomly removed to create loops between the start and goal cells. Any shortest path from start to goal is a valid solution; shortest-path counts (1 to 924) are computed exactly.
+  \item \textbf{Graph colouring:} 10-node graphs generated with a planted 3-colouring by joining differently coloured node pairs with random edge density. Solutions are counted in canonical form (colours numbered by order of first appearance), so relabelling colours does not create spurious solutions; counts range from 1 to 9842.
+\end{itemize}
+
+\paragraph{Human-made tasks (Pencil Puzzle Bench).}
+Generated puzzles have uniform random constraint structure, which may differ from puzzles designed by human setters. To test models on human-designed logical structure, we build two $10\times 10$ binary-shading benchmarks from the uniquely solvable \emph{base puzzles} of Pencil Puzzle Bench (PPBench)~\cite{waugh2026}:
+\begin{itemize}
+  \item \textbf{Heyawake:} The grid is partitioned into rectangular rooms, some containing a clue number specifying how many cells in that room are shaded (shaded cells cannot touch orthogonally, unshaded cells must be connected, and straight runs of unshaded cells cannot cross more than one room boundary). We apply random dihedral symmetries and \emph{loosen} constraints by removing up to 40\% of room numbers.
+  \item \textbf{Nurikabe:} Numbered cells mark unshaded ``islands'' of the given size separated by a single connected ``sea'' of shaded cells containing no $2\times 2$ shaded blocks. Removing a number outright would forbid its island under Nurikabe rules, so we loosen puzzles by replacing a subset of clue numbers with ``\texttt{?}'' (allowing an island of any size).
+\end{itemize}
+Because loosening only removes constraints, every original base-puzzle solution remains valid while additional valid solutions become admissible. All valid solutions of each loosened puzzle are enumerated and counted exactly up to 1023 using the answer-set solver \texttt{clingo}~\cite{gebser2019}. Crucially, the human base puzzles are partitioned into training, validation, and test pools \emph{before} symmetry augmentation and loosening, ensuring that no base puzzle layout is shared across splits.
+
+\paragraph{Storage layouts.}
+Each dataset is written in three directory variants under \texttt{data/}:
+\begin{itemize}
+  \item \texttt{data/<task>-multi} (\texttt{data/graph-coloring-multi} for \texttt{graph}): one row per stored solution, grouped by puzzle input so GRAM samples one random stored solution per input each epoch.
+  \item \texttt{data/<task>-multi-1oml}: one row per puzzle input containing the padded set of all its stored solutions (\texttt{label\_set}), used by \bok{}, MinLoss, hybrid GRAM, and all evaluation scripts.
+  \item \texttt{-single} and \texttt{-unique} variants: single fixed stored solution or unique-solution inputs only, used only for auxiliary checks.
+\end{itemize}
+
+% =============================================================================
+\section{Models and Evaluation Protocol}
+\label{sec:models}
+% =============================================================================
+
+\subsection{Shared Recursive Network}
+To isolate the effect of the generative mechanism and training loss, every model in this report shares GRAM's exact network architecture (\texttt{models/recursive\_reasoning/gram.py}) and compute budget:
+\begin{itemize}
+  \item \textbf{Backbone and states:} A 2-layer transformer block applied recursively to a low-level state and a high-level state $h$.
+  \item \textbf{Transitions and supervision steps:} Each \emph{transition} performs 4 updates of the low-level state followed by 1 update of the high-level state (yielding deterministic update $u_t$), then adds projected stochastic guidance $\epsilon_t$ to form $h_t$. Each \emph{supervision step} executes 3 consecutive transitions and decodes a candidate answer from $h$. Deep supervision applies the training loss across up to 16 supervision steps per input.
+  \item \textbf{Default gradient truncation:} Following GRAM's implementation, gradients are stopped between transitions so that, by default, \textbf{only the last transition} of each supervision step carries gradient back into the network and guidance heads.
+  \item \textbf{Optimisation:} All runs train for 150,000 optimiser steps with a global batch size of 768 sequences, constant learning rate $10^{-4}$ after 2,000 warmup steps, weight decay 1.0, seed 42, and exponential moving average (EMA) weights for evaluation (\texttt{config/arch/gram.yaml}, \texttt{config/cfg\_pretrain.yaml}).
+\end{itemize}
+
+\subsection{Baseline Training Objectives}
+Table~\ref{tab:methods} summarises the three baseline methods trained via \texttt{scripts/multi\_compare.sh <task> <method>}.
+
+\begin{table}[!ht]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    \textbf{Model} & \textbf{\texttt{<method>}} & \textbf{Stochastic guidance} & \textbf{Training loss} \\
+    \midrule
+    GRAM~\cite{baek2026} & \texttt{gram} (\texttt{KL\_COEF}=$\beta$) & Posterior in train; learned prior at test & CE to 1 random stored sol./epoch $+ \beta\cdot\text{KL}$ \\
+    \Bok{}~\cite{guzman2012,bhattacharyya2018} & \texttt{gram\_std\_bestofk} & $\mathcal{N}(0, I)$ in train and test & $K=8$ rollouts; train only closest to a stored sol. \\
+    MinLoss~\cite{nandwani2021} & \texttt{gram\_std\_bestofk} (\texttt{ROLLOUTS=1}) & $\mathcal{N}(0, I)$ ($K=1$ rollout) & CE to the stored solution closest to the answer \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Baseline models compared in Part I. All three use the exact same recursive network and 768-sequence optimiser step.}
+  \label{tab:methods}
+\end{table}
+
+\paragraph{GRAM and reference $\beta$.}
+GRAM trains against one randomly chosen stored solution per input per epoch, sampling per-cell stochastic guidance from its posterior $q_\phi(\epsilon_t \mid u_t, y)$ and penalising $\beta\,\mathrm{KL}(q_\phi \,\|\, p_\theta)$ (with Dreamer-style KL balancing $\alpha=0.8$). Because cross-entropy is averaged over cells while KL is summed, GRAM's own configurations follow the scaling rule $\beta \approx 4.5 / (\text{number of answer cells})$. We adopt this exact rule for our \emph{reference $\beta$} values: $0.05$ on Sudoku, $0.45$ on graph colouring, $0.02$ on mazes, and $0.045$ on heyawake and nurikabe.
+
+\paragraph{Why MinLoss and \Bok{}?}
+In a posterior-free model whose stochastic guidance is drawn from $\mathcal{N}(0, I)$ without seeing the target, training naively against a random stored solution pulls the same input toward conflicting targets across epochs, causing the network to output invalid averages of solutions~\cite{nandwani2021} (Figure~\ref{fig:blend}). \textbf{MinLoss}~\cite{nandwani2021} resolves this conflict by computing cross-entropy against whichever stored solution $s \in S(x)$ is closest to the model's current prediction $\hat{y}$, allowing the model to commit cleanly to one valid solution. \textbf{\Bok{}} combines MinLoss with multiple-choice / best-of-many training~\cite{guzman2012,bhattacharyya2018}: each input in a batch is replicated $K=8$ times with independent $\mathcal{N}(0, I)$ guidance draws, and cross-entropy is applied \emph{only} to the single rollout achieving minimum loss against any stored solution (Figure~\ref{fig:bok_diagram}):
+\begin{equation}
+  \mathcal{L}_{\text{BoK}}(x) = \min_{1 \le j \le K}\ \min_{s \in S(x)}\ \ell(\hat{y}_j, s),
+\end{equation}
+while halting-head supervision is averaged across rollouts. To keep total compute matched at 768 sequences per optimiser step, \Bok{} processes $768 / 8 = 96$ puzzle inputs per step (versus 768 inputs per step for GRAM and MinLoss).
+
+\begin{figure}[!ht]
+  \centering
+  \begin{tikzpicture}[x=1.05cm,y=0.92cm,font=\footnotesize]
+    \node[font=\scriptsize\bfseries,text=slate] at (1.75,2.65) {8 random draws};
+    \node[font=\scriptsize\bfseries,text=slate] at (6.2,2.65) {8 answers};
+    \node[font=\scriptsize\bfseries,text=slate] at (9.6,2.65) {stored solutions $S(x)$};
+    \node[draw=navy,rounded corners=2pt,fill=softbg,minimum width=1.1cm,minimum height=0.8cm,align=center]
+      at (0,0) {input\\$x$};
+    \node[draw=navy,rounded corners=3pt,fill=softbg,minimum width=2.4cm,minimum height=4.6cm,align=center,
+      font=\scriptsize] at (4.0,0) {\textbf{shared network}\\[5pt]recursion over\\16 supervision\\steps};
+    \foreach \j/\y in {1/2.0,2/1.43,3/0.86,4/0.29,5/-0.29,6/-0.86,7/-1.43,8/-2.0} {
+      \draw[gray!55] (0.55,0) -- (1.45,\y);
+      \node[font=\scriptsize,text=slate] at (1.75,\y) {$\epsilon_{\j}$};
+      \draw[gray!55,-stealth] (2.05,\y) -- (2.8,\y);
+      \draw[gray!55,-stealth] (5.2,\y) -- (5.95,\y);
+      \node[circle,draw=gray!70,fill=white,inner sep=0pt,minimum size=0.44cm,font=\tiny] (y\j) at (6.2,\y) {$\hat y_{\j}$};
+    }
+    \foreach \k/\y in {1/1.15,2/0,3/-1.15}
+      \node[draw=slate,thick,fill=white,minimum size=0.52cm,font=\scriptsize] (s\k) at (9.6,\y) {$s_{\k}$};
+    \foreach \j/\k in {1/1,2/1,4/1,5/2,6/1,7/2,8/3}
+      \draw[gray!45] (y\j.east) -- (s\k.west);
+    \draw[navy,line width=1.3pt] (2.05,0.86) -- (2.8,0.86);
+    \draw[navy,line width=1.3pt] (5.2,0.86) -- (5.95,0.86);
+    \node[circle,draw=navy,fill=navy,text=white,inner sep=0pt,minimum size=0.44cm,font=\tiny] at (6.2,0.86) {$\hat y_{3}$};
+    \draw[navy,line width=1.4pt,-stealth] (6.45,0.86) -- (9.3,1.12);
+    \node[font=\scriptsize,text=navy,align=center] at (7.85,1.65) {closest pair:\\\textbf{trained}};
+    \node[font=\scriptsize,text=gray,align=center] at (9.6,-2.05) {other 7 rollouts:\\\textbf{no gradient}};
+  \end{tikzpicture}
+  \caption{Training mechanics of the \Bok{} baseline ($K=8$). Each input $x$ is evaluated across 8 independent $\mathcal{N}(0, I)$ rollouts; only the single rollout closest to any stored solution receives cross-entropy gradient.}
+  \label{fig:bok_diagram}
+\end{figure}
+
+\subsection{Sampling Protocol and Metrics}
+\label{sec:metrics}
+{\sloppy At evaluation time (\texttt{sample\_predictions.py} and \texttt{scripts/analyze\_multi\_samples.py}), every model draws \textbf{100 independent samples per input}. Each sample runs all 16 supervision steps with fresh stochastic guidance at every transition and greedy argmax token decoding at the final step. Importantly, we apply \textbf{no early halting and no post-hoc sample selection or verifier filtering}, measuring the raw distribution produced by the model.\par}
+
+Each experimental result is reported as three numbers: \textbf{validity / unique-solution validity / distinct@100}:
+\begin{itemize}
+  \item \textbf{Validity (\%):} Percentage of all 100 samples that satisfy every task constraint, averaged across all evaluated inputs.
+  \item \textbf{Unique-solution validity (\%):} Validity restricted to inputs that have \emph{exactly one} solution. Because no choice among solutions is needed on these inputs, any drop here reflects a pure solving failure.
+  \item \textbf{Distinct@100:} Number of distinct valid solutions found among the 100 samples, averaged over inputs with two or more solutions. In brackets, we express \texttt{distinct@100} as a percentage of what an ideal \emph{uniform sampler} over each input's $n$ solutions would find in 100 draws, namely $n\bigl(1 - (1 - 1/n)^{100}\bigr)$. Averaged over multi-solution inputs, a uniform sampler achieves \textbf{39.3} on Sudoku, \textbf{48.4} on graph colouring, \textbf{43.5} on mazes, \textbf{40.3} on heyawake, and \textbf{38.7} on nurikabe on validation (test: \textbf{39.2}, \textbf{49.2}, \textbf{44.5}, \textbf{40.4}, \textbf{40.0}). For example, GRAM's 34.0 on validation Sudoku corresponds to 87\% of a uniform sampler.
+\end{itemize}
+
+\paragraph{Run summaries vs.\ single-checkpoint evaluations.}
+Because diversity fluctuates noticeably across neighbouring checkpoints, validation comparisons use \emph{run summaries}: we score every second saved checkpoint on 500 validation inputs (\texttt{scripts/score\_checkpoints.sh}) and average the last 4 scored checkpoints (\texttt{scripts/checkpoint\_trends.py}). Test-split evaluations (all 2,000 inputs), unseen-solution evaluations on training inputs, test-time state noise ($\sigma > 0$), and posterior-sampling diagnostics are evaluated on the \emph{final checkpoint} (\texttt{scripts/multi\_evaluate.sh}). Throughout our tables, the best metric value among compared models is \textbf{bold} and the second best is \secbest{underlined} (within a row when models are columns, and within a column when models are rows).
+
+% =============================================================================
+\section{Part I: Baseline Study (Questions Q1--Q3)}
+\label{sec:baseline}
+% =============================================================================
+
+\subsection{Q1: How Should $\beta$ Be Chosen for a New Task?}
+\textbf{Answer:} Carefully---$\beta$ works only within a narrow, task-specific band, and carrying over a scaling rule from other tasks can miss that band entirely.
+
+\begin{table}[!ht]
+  \centering
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Task} & \textbf{$\frac{1}{2}$ reference $\beta$} & \textbf{reference $\beta$} & \textbf{$2\times$ reference $\beta$} \\
+    \midrule
+    Sudoku & \secbest{53.6} / 79.8 / \secbest{14.4} (37\%) & \textbf{92.5} / \secbest{97.6} / \textbf{34.0} (87\%) & 35.4 / \textbf{98.3} / 0.3 (1\%) \\
+    Graph colouring & 71.5 / 93.4 / \secbest{31.2} (64\%) & \textbf{97.0} / \secbest{97.4} / \textbf{44.9} (93\%) & \secbest{86.5} / \textbf{100.0} / 2.2 (5\%) \\
+    Maze & \textbf{67.3} / 48.2 / \textbf{35.3} (81\%) & \secbest{35.9} / \secbest{97.8} / \secbest{0.8} (2\%) & 33.8 / \textbf{98.6} / 0.0 (0\%) \\
+    Heyawake & 2.2 / 1.6 / \secbest{1.8} (4\%) & \textbf{78.7} / \secbest{72.0} / \textbf{33.8} (84\%) & \secbest{61.0} / \textbf{95.2} / 0.5 (1\%) \\
+    Nurikabe & 0.1 / 0.0 / 0.1 (0\%) & \textbf{82.0} / \secbest{83.9} / \textbf{29.8} (77\%) & \secbest{54.3} / \textbf{88.2} / \secbest{0.5} (1\%) \\
+    \bottomrule
+  \end{tabular}
+  \caption{GRAM across $\beta$ on validation (run summaries): validity (\%) / unique-solution validity (\%) / distinct@100 (\% of uniform sampler). Reference $\beta$: Sudoku $0.05$, graph colouring $0.45$, maze $0.02$, heyawake and nurikabe $0.045$.}
+  \label{tab:beta}
+\end{table}
+
+\begin{figure}[!ht]
+  \centering
+  \begin{tikzpicture}
+    \begin{groupplot}[
+      group style={group size=5 by 1, horizontal sep=0.35cm, yticklabels at=edge left},
+      width=3.35cm, height=3.8cm, xmin=-0.45, xmax=2.45, ymin=0, ymax=105,
+      xtick={0,1,2}, xticklabels={$\frac{1}{2}$,$1$,$2$}, ytick={0,25,50,75,100},
+      tick label style={font=\scriptsize}, title style={font=\small\bfseries,text=navy,yshift=-2pt},
+      ymajorgrids, major grid style={gray!20}, axis x line*=bottom, axis y line*=left]
+      \nextgroupplot[title={Sudoku}, ylabel={\scriptsize \%}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color=accentblue,thick,mark=*,mark size=1.6pt] coordinates {(0,53.6) (1,92.5) (2,35.4)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,79.8) (1,97.6) (2,98.3)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.1pt] coordinates {(0,37) (1,87) (2,1)};
+      \nextgroupplot[title={Graph col.}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color=accentblue,thick,mark=*,mark size=1.6pt] coordinates {(0,71.5) (1,97.0) (2,86.5)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,93.4) (1,97.4) (2,100.0)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.1pt] coordinates {(0,64) (1,93) (2,5)};
+      \nextgroupplot[title={Maze}, xlabel={\footnotesize $\times$ reference $\beta$},
+        legend style={font=\footnotesize,draw=none,fill=none,at={(0.5,-0.44)},anchor=north,legend columns=3,
+          /tikz/every even column/.append style={column sep=10pt}}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(-0.45,0) (0.45,0) (0.45,105) (-0.45,105)} -- cycle;
+        \addplot[color=accentblue,thick,mark=*,mark size=1.6pt] coordinates {(0,67.3) (1,35.9) (2,33.8)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,48.2) (1,97.8) (2,98.6)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.1pt] coordinates {(0,81) (1,2) (2,0)};
+        \legend{Validity (\%), Unique-solution validity (\%), Distinct@100 (\% of uniform)}
+      \nextgroupplot[title={Heyawake}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color=accentblue,thick,mark=*,mark size=1.6pt] coordinates {(0,2.2) (1,78.7) (2,61.0)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,1.6) (1,72.0) (2,95.2)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.1pt] coordinates {(0,4) (1,84) (2,1)};
+      \nextgroupplot[title={Nurikabe}]
+        \addplot[fill=gray!14,draw=none,forget plot] coordinates {(0.55,0) (1.45,0) (1.45,105) (0.55,105)} -- cycle;
+        \addplot[color=accentblue,thick,mark=*,mark size=1.6pt] coordinates {(0,0.1) (1,82.0) (2,54.3)};
+        \addplot[color={rgb,255:red,42;green,157;blue,143},thick,dashed,mark=square*,mark size=1.5pt,mark options={solid}] coordinates {(0,0.0) (1,83.9) (2,88.2)};
+        \addplot[color={rgb,255:red,210;green,105;blue,30},very thick,mark=triangle*,mark size=2.1pt] coordinates {(0,0) (1,77) (2,1)};
+    \end{groupplot}
+  \end{tikzpicture}
+  \caption{Sensitivity of GRAM to $\beta$ across all five tasks (plotting Table~\ref{tab:beta}; shaded bands mark the best $\beta$ among the three values tested). Halving or doubling the best $\beta$ causes severe degradation through either prior--posterior mismatch (left of band) or posterior collapse (right of band).}
+  \label{fig:beta_sweep}
+\end{figure}
+
+Table~\ref{tab:beta} and Figure~\ref{fig:beta_sweep} show GRAM trained at $\frac{1}{2}\times$, $1\times$, and $2\times$ the reference $\beta$ on every task. Moving by a factor of two in either direction breaks performance on almost every benchmark---in fact, on heyawake and nurikabe, intermediate sweeps show that GRAM already collapses at just $1.27\times$ the reference $\beta$ (\texttt{distinct@100} drops to $0.6$, or 1--2\% of uniform), while on mazes the reference $\beta = 0.02$ itself has already collapsed ($0.8$ distinct@100) and $\frac{1}{2}\beta = 0.01$ is required to recover diversity.
+
+\paragraph{Diagnosing the two failure modes via posterior sampling.}
+Evaluating GRAM with \textbf{posterior sampling} (\texttt{LATENT=posterior}, where test-time guidance is drawn from the posterior conditioned on a random stored solution rather than from the prior) cleanly separates what goes wrong on either side of the working $\beta$ band:
+\begin{itemize}
+  \item \textbf{Below the band (prior--posterior mismatch):} At $\frac{1}{2}$ reference $\beta$, prior-sampled validity collapses even on unique-solution inputs (79.8\% on Sudoku, 48.2\% on mazes, 1.6\% on heyawake, 0.0\% on nurikabe). Yet posterior sampling still yields \textbf{98--100\% valid answers} (for instance, 99.3\% posterior validity vs.\ 2.2\% prior validity on heyawake at $\frac{1}{2}\beta$). Thus, the recursive network itself knows how to decode valid solutions, but the weakly regularised posterior encodes target information in latent regions that the prior never learns to cover.
+  \item \textbf{Above the band (collapse):} At $2\times$ reference $\beta$, unique-solution validity remains high (88.2--100.0\%), but \texttt{distinct@100} drops to 0.0--2.2 across all tasks and multi-solution validity falls sharply as the model blends conflicting targets. Here, prior and posterior validity agree (e.g.\ 61.0\% prior vs.\ 60.1\% posterior on heyawake at $2\times\beta$), confirming that the stochastic guidance carries virtually no target information.
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\subsection{Q2: Is a Posterior That Sees the Target Needed?}
+\textbf{Answer:} Not for validity, where posterior-free baselines win on every task---but no posterior-free baseline reaches GRAM's diversity.
+
+\begin{table}[!ht]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Task (Validation, run summaries)} & \textbf{GRAM (reference $\beta$)} & \textbf{\Bok{}} & \textbf{MinLoss} \\
+    \midrule
+    Sudoku & 92.5 / 97.6 / \textbf{34.0} (87\%) & \secbest{99.2} / \secbest{99.3} / \secbest{10.4} (26\%) & \textbf{99.5} / \textbf{99.8} / 2.5 (6\%) \\
+    Graph colouring & 97.0 / 97.4 / \textbf{44.9} (93\%) & \textbf{99.8} / \textbf{100.0} / \secbest{38.4} (79\%) & \secbest{99.7} / \secbest{99.5} / 1.8 (4\%) \\
+    Maze (GRAM at $\frac{1}{2}\beta$, 0.01) & 67.3 / 48.2 / \textbf{35.3} (81\%) & \secbest{83.3} / \secbest{75.4} / \secbest{2.2} (5\%) & \textbf{88.4} / \textbf{94.1} / 1.0 (2\%) \\
+    Heyawake & 78.7 / 72.0 / \textbf{33.8} (84\%) & \secbest{85.3} / \secbest{81.9} / \secbest{9.7} (24\%) & \textbf{96.2} / \textbf{97.6} / 1.3 (3\%) \\
+    Nurikabe & \secbest{82.0} / \secbest{83.9} / \textbf{29.8} (77\%) & 78.7 / 78.4 / \secbest{7.2} (19\%) & \textbf{89.1} / \textbf{94.4} / 1.2 (3\%) \\
+    \midrule
+    \textbf{Task (Test, final checkpoint)} & \textbf{GRAM} & \textbf{\Bok{}} & \textbf{MinLoss} \\
+    \midrule
+    Sudoku & \secbest{89.9} / 97.3 / \textbf{32.6} (83\%) & \textbf{99.5} / \secbest{99.9} / \secbest{11.8} (30\%) & \textbf{99.5} / \textbf{100.0} / 2.8 (7\%) \\
+    Graph colouring & 99.0 / 99.7 / \textbf{46.6} (95\%) & \secbest{99.6} / \secbest{99.9} / \secbest{39.6} (80\%) & \textbf{99.9} / \textbf{100.0} / 1.9 (4\%) \\
+    Maze (GRAM at 0.01) & 66.7 / 52.2 / \textbf{35.9} (81\%) & \textbf{88.8} / \secbest{78.3} / \secbest{2.1} (5\%) & \secbest{84.1} / \textbf{94.5} / 0.9 (2\%) \\
+    Heyawake & 77.0 / 68.7 / \textbf{33.1} (82\%) & \secbest{81.7} / \secbest{77.9} / \secbest{9.9} (25\%) & \textbf{94.4} / \textbf{93.7} / 1.3 (3\%) \\
+    Nurikabe & \secbest{81.1} / \secbest{80.3} / \textbf{31.0} (78\%) & 77.9 / 79.1 / \secbest{7.8} (20\%) & \textbf{86.1} / \textbf{89.0} / 1.3 (3\%) \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Baseline comparison on validation (top) and the 2,000-input test split (bottom). On mazes, where GRAM collapses at the reference $\beta = 0.02$ (test: $39.5 / 97.6 / 1.5$ (3\%)), GRAM is evaluated at its best validation setting $\frac{1}{2}\beta = 0.01$.}
+  \label{tab:q2}
+\end{table}
+
+Table~\ref{tab:q2} compares GRAM against \Bok{} and MinLoss on both validation and test splits (giving GRAM its best validation $\beta=0.01$ on mazes so the comparison is charitable to GRAM). Every test value lies within 6 points of validation and preserves the exact same qualitative ranking across all five tasks:
+\begin{itemize}
+  \item \textbf{Diversity:} GRAM achieves the highest \texttt{distinct@100} on every task, reaching 78--95\% of an ideal uniform sampler on test. MinLoss is nearly deterministic (0.9--2.8 distinct@100), and \Bok{} sits in between (strongly diverse on graph colouring at 39.6 (80\%), moderate on Sudoku/heyawake/nurikabe at 7.8--11.8, and low on mazes at 2.1).
+  \item \textbf{Validity cost of diversity:} MinLoss or \Bok{} achieves the highest validity on every task; no model wins both metrics. On the test split, GRAM's diversity costs \textbf{0.9 percentage points} of validity on graph colouring (99.0\% vs.\ 99.9\%), \textbf{5.0 points} on nurikabe, \textbf{9.6 points} on Sudoku, \textbf{17.4 points} on heyawake, and \textbf{22.1 points} on mazes.
+  \item \textbf{Residual mismatch on single-solution puzzles:} Much of GRAM's validity loss occurs even when there is only one valid answer. On validation heyawake, GRAM solves just \textbf{72.0\%} of unique-solution puzzles compared with MinLoss's \textbf{97.6\%} (test: 68.7\% vs.\ 93.7\%), because residual prior--posterior mismatch remains even inside the usable $\beta$ band.
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\subsection{Q3: Do the Models Produce Unseen Solutions?}
+\textbf{Answer:} Yes---every model produces unseen solutions as often as a uniform sampler over all valid solutions would.
+
+\begin{table}[!ht]
+  \centering
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Task} & \textbf{GRAM} & \textbf{\Bok{}} & \textbf{MinLoss} \\
+    \midrule
+    Sudoku & 76.5 (76.6) & 77.0 (76.8) & 77.6 (76.6) \\
+    Graph colouring & 84.3 (84.5) & 84.7 (84.6) & 82.6 (84.6) \\
+    Maze (GRAM at 0.01) & 79.2 (78.9) & 75.7 (76.5) & 68.2 (68.3) \\
+    Heyawake & 76.9 (77.0) & 76.0 (76.2) & 71.8 (76.1) \\
+    Nurikabe & 75.6 (75.3) & 74.4 (74.9) & 72.7 (73.3) \\
+    \bottomrule
+  \end{tabular}
+  \caption{Unseen-solution share (\%) among valid samples on training inputs that have more than 16 solutions (801--881 evaluated inputs per task; final checkpoints). Brackets show the unseen share expected from a uniform sampler over each input's full solution set.}
+  \label{tab:q3}
+\end{table}
+
+Table~\ref{tab:q3} evaluates the final checkpoints on training inputs with more than 16 valid solutions, measuring what fraction of valid samples fall outside the 16 stored training solutions. Across all five tasks, GRAM, \Bok{}, and even MinLoss produce unseen solutions at essentially the exact rate of a uniform sampler over the full solution set. Neither GRAM's target-conditioned posterior nor MinLoss's nearest-stored-solution objective causes the model to memorise or prefer the specific solutions stored in its training split; storing 16 solutions per input is sufficient to generalise across the rest.
+
+% =============================================================================
+\section{Part II: Can One Model Be Both Valid and Diverse?}
+\label{sec:ideas}
+% =============================================================================
+
+Part I leaves an open design question: can a single model achieve the baselines' validity alongside GRAM's diversity? Table~\ref{tab:ideas_overview} summarises five interventions we tested in sequence---four attempting to raise the diversity of the posterior-free baseline (Ideas 1--3 and 5) and one attempting to raise GRAM's test-time validity (Idea 4).
+
+\begin{table}[!ht]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}ll>{\raggedright\arraybackslash}p{6.6cm}l@{}}
+    \toprule
+    \textbf{Idea} & \textbf{Direction} & \textbf{Intervention} & \textbf{Verdict (README)} \\
+    \midrule
+    Idea 1 & Baseline $\to$ diverse & Add test-time Gaussian state noise $\mathcal{N}(0,\sigma^2)$ to high-level state & \verdictpartial \\
+    Idea 2 & Baseline $\to$ diverse & Persistent or trained randomness (sample-level vector, STRM, train noise) & \verdictfail{} (mixed by task) \\
+    Idea 3 & Baseline $\to$ diverse & Train all $K=8$ rollouts (\texttt{Nearest} and \texttt{Balanced} target assignments) & \verdictfail \\
+    Idea 4 & GRAM $\to$ valid & Hybrid GRAM: train a fraction of batch rows with prior + MinLoss & \verdictfail \\
+    Idea 5 & Baseline $\to$ diverse & Backpropagate gradients through all transitions (\texttt{FULL\_GRAD=1}) & \verdictpartial \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Overview of the five interventions studied in Section~\ref{sec:ideas}.}
+  \label{tab:ideas_overview}
+\end{table}
+
+% -----------------------------------------------------------------------------
+\subsection{Idea 1: Test-Time State Noise for the Baseline}
+\label{sec:idea1}
+
+\paragraph{Hypothesis and change.}
+{\sloppy \Bok{} produces limited diversity on four of the five tasks because its high-level state trajectory remains nearly deterministic despite per-cell $\mathcal{N}(0,I)$ guidance. Inspired by the Probabilistic Tiny Recursive Model (PTRM)~\cite{sghaier2026}, injecting Gaussian noise $\mathcal{N}(0, \sigma^2)$ directly into the high-level state during every non-gradient transition at test time (\texttt{NOISE=<$\sigma$>} in \texttt{scripts/multi\_evaluate.sh}, \texttt{-\/-state\_noise} in \texttt{sample\_predictions.py}) should perturb trajectories into different solution basins.\par}
+
+\begin{table}[!ht]
+  \centering
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Task (Validation, final ckpt)} & \textbf{\Bok{}} & \textbf{$\sigma = 0.5$} & \textbf{$\sigma = 1$} \\
+    \midrule
+    Sudoku & \secbest{99.2} / 10.4 (26\%) & \textbf{99.5} / \secbest{27.7} (70\%) & 97.5 / \textbf{29.1} (74\%) \\
+    Graph colouring & \textbf{99.8} / 38.4 (79\%) & \secbest{99.6} / \secbest{39.5} (82\%) & 99.4 / \textbf{40.4} (83\%) \\
+    Maze & 83.3 / 2.2 (5\%) & \secbest{88.5} / \secbest{3.2} (7\%) & \textbf{89.9} / \textbf{4.4} (10\%) \\
+    Heyawake & \textbf{85.3} / 9.7 (24\%) & \secbest{85.0} / \secbest{10.7} (27\%) & 83.6 / \textbf{11.7} (29\%) \\
+    Nurikabe & \textbf{78.7} / 7.2 (19\%) & \secbest{78.5} / \secbest{7.7} (20\%) & 76.9 / \textbf{8.5} (22\%) \\
+    \bottomrule
+  \end{tabular}
+  \caption{Idea 1: \Bok{} with test-time state noise $\sigma$ on validation (validity (\%) / distinct@100 (\% of uniform), final checkpoint; baseline column shows run summary).}
+  \label{tab:idea1}
+\end{table}
+
+\paragraph{Results.}
+Table~\ref{tab:idea1} shows a sharp split between Sudoku and the other four tasks:
+\begin{itemize}
+  \item On \textbf{Sudoku}, test-time state noise nearly triples \texttt{distinct@100} from 10.4 (26\%) to \textbf{27.7 (70\%)} at $\sigma=0.5$ with no loss in validity (99.5\%), and reaches \textbf{29.1 (74\%)} at $\sigma=1$ (97.5\% valid), before breaking sharply at $\sigma=1.5$ (23.0\% valid). Test-split evaluations confirm the same jump: $99.4 / 99.9 / 27.8$ (71\%) at $\sigma=0.5$ and $97.5 / 99.8 / 29.3$ (75\%) at $\sigma=1$.
+  \item Across \textbf{all other tasks}, state noise adds at most \textbf{+2.2} \texttt{distinct@100} on validation (and similarly small gains on test: graph colouring $39.6 \to 40.0,\ 41.0$; heyawake $9.9 \to 10.4,\ 11.3$; nurikabe $7.8 \to 8.3,\ 8.9$ at $\sigma=0.5,\ 1$).
+  \item Applying state noise to \textbf{MinLoss} exhibits the exact same pattern: on Sudoku $\sigma=0.5$ lifts \texttt{distinct@100} from 2.5 (6\%) to 18.0 (46\%), whereas on the human-made puzzles it barely moves diversity---heyawake rises from $1.3$ (3\%) to $2.4$ (6\%) and $3.5$ (9\%) (validity $96.2\% \to 95.3\%,\ 94.7\%$ at $\sigma=0.5,\ 1$), and nurikabe rises from $1.2$ (3\%) to $2.4$ (6\%) and $3.7$ (10\%) (validity $89.1\% \to 88.7\%,\ 87.1\%$).
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\subsection{Idea 2: Persistent or Trained Randomness}
+\label{sec:idea2}
+
+\paragraph{Hypothesis and changes.}
+Idea 1's state noise is injected independently per cell and only at test time, so its effect may wash out over recursion or push the state off-manifold. We tested three ways to provide randomness that either persists across the entire recursion or is seen during training:
+\begin{enumerate}
+  \item \textbf{One vector per sample (\texttt{LATENT\_SCOPE=sample}):} Draw a single $\mathcal{N}(0,I)$ vector shared across all cells and held fixed across all transitions of a sample, rather than redrawing per cell and transition.
+  \item \textbf{STRM random initial state (\texttt{strm\_bestofk}):} Adopt the single-state moving-average recursion of Simpler Tiny Recursive Models (STRM)~\cite{glass2026}, initialised from a fresh random start state per sample (with or without stochastic guidance).
+  \item \textbf{Training-time state noise (\texttt{TRAIN\_NOISE=1}):} Inject $\sigma=1$ state noise into non-gradient transitions during training as well, so the network learns to use it.
+\end{enumerate}
+
+\begin{table}[!ht]
+  \centering
+  \small
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Variant (Validation, run summaries)} & \textbf{Sudoku} & \textbf{Graph colouring} & \textbf{Maze} & \textbf{Heyawake} \\
+    \midrule
+    \Bok{} & 99.2 / 99.3 / 10.4 (26\%) & \secbest{99.8} / \textbf{100.0} / \textbf{38.4} (79\%) & \secbest{83.3} / \secbest{75.4} / \secbest{2.2} (5\%) & \secbest{85.3} / \secbest{81.9} / \textbf{9.7} (24\%) \\
+    One vector per sample & \secbest{99.7} / \secbest{99.7} / 8.9 (23\%) & 47.7 / \secbest{58.9} / 15.0 (31\%) & \textbf{85.3} / \textbf{87.2} / \textbf{7.0} (16\%) & \\
+    STRM (random initial state) & \textbf{99.9} / \textbf{99.9} / \secbest{16.8} (43\%) & \textbf{99.9} / -- / \secbest{19.9} (41\%) & & \textbf{86.8} / \textbf{83.2} / \secbest{4.1} (10\%) \\
+    STRM + stochastic guidance & 94.8 / -- / \textbf{19.2} (49\%) & & & \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{0.6em}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Sudoku, test-time state noise (final ckpt)} & \textbf{$\sigma = 0$} & \textbf{$\sigma = 0.5$} & \textbf{$\sigma = 1$} & \textbf{$\sigma = 1.5$} \\
+    \midrule
+    \Bok{} & 99.2 / \secbest{10.4} (26\%) & \secbest{99.5} / \textbf{27.7} (70\%) & 97.5 / \textbf{29.1} (74\%) & \secbest{23.0} / \secbest{1.7} (4\%) \\
+    STRM & \textbf{99.9} / \textbf{16.8} (43\%) & \textbf{99.9} / \secbest{20.1} (51\%) & \secbest{97.9} / \secbest{26.1} (66\%) & 21.8 / 0.9 (2\%) \\
+    \Bok{} trained with state noise $\sigma = 1$ (58k steps) & \secbest{99.3} / 4.1 (10\%) & & \textbf{99.5} / 21.4 (54\%) & \textbf{99.0} / \textbf{27.8} (71\%) \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Idea 2: Persistent and trained randomness across tasks (top; `--' indicates unique-solution validity not measured, blank indicates not run) and combined with test-time state noise on Sudoku (bottom, validity / distinct@100).}
+  \label{tab:idea2}
+\end{table}
+
+\paragraph{Results.}
+Table~\ref{tab:idea2} shows mixed task-level effects that ultimately fail to close the gap to GRAM:
+\begin{itemize}
+  \item Sharing \textbf{one vector per sample} improves mazes ($83.3 / 75.4 / 2.2 \to 85.3 / 87.2 / 7.0$), slightly reduces diversity on Sudoku ($10.4 \to 8.9$), and severely degrades validity on graph colouring ($47.7\%$).
+  \item \textbf{STRM} with a random starting state raises no-noise diversity on Sudoku ($10.4 \to 16.8$, and $19.2$ with stochastic guidance at $94.8\%$ validity), but cuts diversity roughly in half on graph colouring ($38.4 \to 19.9$) and heyawake ($9.7 \to 4.1$).
+  \item Combining these variants with state noise on Sudoku never surpasses \textbf{$\sim$28 distinct@100 (71\%)} at 99\% validity (vs.\ GRAM's 34.0, 87\%). \textbf{Training with state noise} shifts the noise threshold at which validity breaks ($\sigma=2$ still achieves $94.0 / 27.2$ (69\%)), without raising peak diversity ($27.8$ at $\sigma=1.5$), and breaks validity on graph colouring ($36.7 / 20.0$ (41\%) at $\sigma=1$ after 80k steps).
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\subsection{Idea 3: Train Every Rollout, Not Only the Closest}
+\label{sec:idea3}
+
+\paragraph{Hypothesis and changes.}
+Because changing the randomness distribution did not break the $\sim$28 ceiling on Sudoku, we examined credit assignment. Standard \Bok{} discards gradients on 7 of its 8 rollouts per step. Training \emph{all} 8 rollouts toward stored solutions should provide $8\times$ denser supervision and spread rollouts across solutions. We implemented two all-rollout objectives in \texttt{models/losses.py} (\texttt{ACTLossHead}, \texttt{balanced\_assignment}), illustrated in Figure~\ref{fig:rollout_objectives}:
+\begin{itemize}
+  \item \textbf{Nearest (\texttt{gram\_std\_nearest}):} Every rollout is trained toward its own closest stored solution.
+  \item \textbf{Balanced (\texttt{gram\_std\_balanced}):} Each stored solution accepts at most $\lceil 8 / |S(x)| \rceil$ rollouts, greedily matching closest rollout--solution pairs first; rollouts forced onto a non-nearest stored solution are weighted by \texttt{FORCED\_WEIGHT=0.3} so forced assignments do not overwhelm solved ones.
+\end{itemize}
+
+\begin{figure}[!ht]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[x=1.08cm,y=0.82cm,font=\scriptsize]
+    % ---------- panel 1: MinLoss ----------
+    \begin{scope}[xshift=0cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.85) {MinLoss ($K=1$)};
+      \node[text=slate,align=center,text width=3.1cm] at (0.95,2.25) {one rollout, trained\\to its closest};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (a\k) at (1.9,\y) {$s_{\k}$};
+      \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.28cm] (ar) at (0,0.25) {};
+      \draw[navy,line width=1.1pt,-stealth] (ar) -- (a1.west);
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.5 / 2.5};
+    \end{scope}
+    % ---------- panel 2: best-of-K ----------
+    \begin{scope}[xshift=3.55cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.85) {\Bok{} ($K=8$)};
+      \node[text=slate,align=center,text width=3.2cm] at (0.95,2.25) {only the closest\\pair is trained};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (b\k) at (1.9,\y) {$s_{\k}$};
+      \foreach \j/\y in {1/1.75,2/1.25,4/0.25,5/-0.25,6/-0.75,7/-1.25,8/-1.75}
+        \node[circle,draw=gray!60,fill=white,inner sep=0pt,minimum size=0.28cm] at (0,\y) {};
+      \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.28cm] (br) at (0,0.75) {};
+      \draw[navy,line width=1.1pt,-stealth] (br) -- (b1.west);
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.2 / \textbf{10.4}};
+    \end{scope}
+    % ---------- panel 3: nearest ----------
+    \begin{scope}[xshift=7.1cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.85) {Nearest};
+      \node[text=slate,align=center,text width=3.1cm] at (0.95,2.25) {every rollout trained\\to its own closest};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (c\k) at (1.9,\y) {$s_{\k}$};
+      \foreach \j/\y/\k in {1/1.75/1,2/1.25/1,3/0.75/1,4/0.25/1,5/-0.25/2,6/-0.75/1,7/-1.25/2,8/-1.75/3} {
+        \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.28cm] (c\j r) at (0,\y) {};
+        \draw[navy,line width=0.8pt,-stealth] (c\j r) -- (c\k.west);
+      }
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.3 / 4.6};
+    \end{scope}
+    % ---------- panel 4: balanced ----------
+    \begin{scope}[xshift=10.65cm]
+      \node[font=\small\bfseries,text=navy] at (0.95,2.85) {Balanced};
+      \node[text=slate,align=center,text width=3.2cm] at (0.95,2.25) {at most $\lceil 8/3\rceil=3$\\rollouts per solution};
+      \foreach \k/\y in {1/1.0,2/0,3/-1.0}
+        \node[draw=slate,thick,fill=white,minimum size=0.42cm] (d\k) at (1.9,\y) {$s_{\k}$};
+      \foreach \j/\y/\k in {1/1.75/1,2/1.25/1,3/0.75/1,5/-0.25/2,7/-1.25/2,8/-1.75/3} {
+        \node[circle,draw=navy,fill=navy,inner sep=0pt,minimum size=0.28cm] (d\j r) at (0,\y) {};
+        \draw[navy,line width=0.8pt,-stealth] (d\j r) -- (d\k.west);
+      }
+      \foreach \j/\y/\k in {4/0.25/3,6/-0.75/2} {
+        \node[circle,draw=accentamber,fill=accentamber,inner sep=0pt,minimum size=0.28cm] (d\j r) at (0,\y) {};
+        \draw[accentamber,line width=0.8pt,dashed,-stealth] (d\j r) -- (d\k.west);
+      }
+      \node[align=center] at (0.95,-2.45) {Sudoku: 99.2 / 3.3};
+    \end{scope}
+    % ---------- legend ----------
+    \begin{scope}[yshift=-3.3cm]
+      \draw[navy,line width=1pt,-stealth] (0.3,0) -- (1.0,0); \node[anchor=west] at (1.05,0) {trained towards closest};
+      \draw[accentamber,line width=1pt,dashed,-stealth] (4.2,0) -- (4.9,0);
+      \node[anchor=west] at (4.95,0) {forced to another solution (weight 0.3)};
+      \node[circle,draw=gray!60,fill=white,inner sep=0pt,minimum size=0.28cm] at (10.55,0) {};
+      \node[anchor=west] at (10.75,0) {untrained rollout};
+    \end{scope}
+  \end{tikzpicture}}
+  \caption{Comparison of target-assignment rules across rollouts (bottom numbers: Sudoku validation validity / distinct@100). Training all 8 rollouts reduces diversity down toward MinLoss ($K=1$), even when \texttt{Balanced} forces rollouts onto distinct solutions.}
+  \label{fig:rollout_objectives}
+\end{figure}
+
+\begin{table}[!ht]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \textbf{Objective (Sudoku)} & \textbf{No noise (run summary)} & \textbf{$\sigma = 0.5$} & \textbf{$\sigma = 1$} \\
+    \midrule
+    \Bok{} (trains closest rollout only) & 99.2 / 99.3 / \textbf{10.4} (26\%) & \textbf{99.5} / \textbf{27.7} (70\%) & \textbf{97.5} / \textbf{29.1} (74\%) \\
+    Nearest & \secbest{99.3} / \textbf{100.0} / \secbest{4.6} (12\%) & 98.1 / \secbest{23.3} (59\%) & 77.1 / 17.1 (44\%) \\
+    Balanced & 99.2 / 99.8 / 3.3 (8\%) & \secbest{99.1} / 16.8 (43\%) & \secbest{90.0} / \secbest{23.5} (60\%) \\
+    Nearest, one vector per sample & \textbf{99.8} / \secbest{99.9} / 4.1 (10\%) & & \\
+    Balanced, one vector per sample & \textbf{99.8} / \textbf{100.0} / 4.1 (10\%) & & \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Idea 3 on Sudoku ($\sigma > 0$ columns report validity / distinct@100 on the final checkpoint).}
+  \label{tab:idea3}
+\end{table}
+
+\paragraph{Results and mechanistic hypothesis.}
+Contrary to expectation, training every rollout \emph{lowers} diversity to nearly MinLoss's level across every variant (Table~\ref{tab:idea3}: 3.3--4.6 distinct@100 on Sudoku, and $80.0 / 76.1 / 2.0$ (5\%) on heyawake and $56.8 / 57.0 / 1.3$ (3\%) on nurikabe for \texttt{Balanced} with one vector per sample). Notably, training logs show that \texttt{Balanced} kept roughly half of its rollouts assigned to non-nearest stored solutions right up to the end of training, yet its decoded answers still failed to spread.
+
+Our explanation (which is consistent with the observations here and tested indirectly in Idea 5, though not yet verified by direct latent-perturbation measurements) is that because gradients are stopped before the final transition of each supervision step, the network cannot tell from the late per-cell guidance which global solution a forced rollout was assigned to. Facing conflicting supervision across rollouts that look indistinguishable on the gradient path, the network learns to ignore the stochastic guidance altogether. Paradoxically, \Bok{}'s baseline diversity appears to come from leaving 7 of 8 rollouts \emph{untrained}.
+
+% -----------------------------------------------------------------------------
+\subsection{Idea 4: Hybrid GRAM}
+\label{sec:idea4}
+
+\paragraph{Hypothesis and change.}
+Approaching the trade-off from GRAM's side, Sohn et al.~\cite{sohn2015} proposed closing the train--test mismatch of conditional VAEs by training a hybrid objective that mixes posterior-guided and prior-guided passes. Because GRAM never trains its decoder directly on samples from its learned prior, we implemented \texttt{gram\_hybrid} (\texttt{hybrid} in \texttt{gram.py} and \texttt{losses.py}): a fraction \texttt{PRIOR\_ROWS} (default 0.25) of each batch draws stochastic guidance from the learned prior and trains with MinLoss against the closest stored solution, while the remaining rows train exactly as in GRAM (with the KL loss computed only on the posterior rows).
+
+\begin{table}[!ht]
+  \centering
+  \small
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Task} & \textbf{GRAM} & \textbf{Hybrid, 25\% prior rows} & \textbf{50\% prior rows} & \textbf{25\%, $\frac{1}{2}\beta$} \\
+    \midrule
+    Heyawake & 78.7 / 72.0 / \textbf{33.8} (84\%) & 79.9 / \secbest{92.3} / 0.9 (2\%) & \textbf{92.3} / \textbf{95.3} / 1.2 (3\%) & \secbest{91.3} / 88.7 / \secbest{6.2} (15\%) \\
+    Nurikabe & \secbest{82.0} / 83.9 / \textbf{29.8} (77\%) & 71.5 / \secbest{90.4} / 0.9 (2\%) & \textbf{85.0} / \textbf{94.2} / \secbest{1.2} (3\%) & 0.0 / 0.0 / 0.0 (0\%) \\
+    Sudoku & \textbf{92.5} / \secbest{97.6} / \textbf{34.0} (87\%) & \secbest{62.7} / \textbf{99.6} / \secbest{1.8} (5\%) & & \\
+    Graph colouring & \secbest{97.0} / \secbest{97.4} / \textbf{44.9} (93\%) & \textbf{99.3} / \textbf{99.5} / \secbest{2.1} (4\%) & & \\
+    \bottomrule
+  \end{tabular}}
+
+  \vspace{0.6em}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Hybrid run (diagnostics)} & \textbf{Posterior sampling (val, final ckpt)} & \textbf{Unseen share (uniform)} \\
+    \midrule
+    Heyawake, 0\% prior rows ($=$ GRAM) & 99.7 / 99.8 / 13.2 (33\%) & 77.1 (76.9) \\
+    Heyawake, 25\% prior rows & 80.4 / 92.9 / 0.9 (2\%) & 69.5 (71.8) \\
+    Heyawake, 50\% prior rows & 93.3 / 95.9 / 1.2 (3\%) & \\
+    Heyawake, 25\% prior rows, $\frac{1}{2}\beta$ & 99.2 / 99.5 / 11.7 (29\%) & \\
+    Nurikabe, 25\% prior rows & 71.8 / 93.0 / 0.9 (2\%) & 68.9 (69.2) \\
+    Sudoku, 25\% prior rows & 63.8 / 99.4 / 2.1 (5\%) & 51.2 (50.7) \\
+    Graph colouring, 25\% prior rows & 99.7 / 99.4 / 1.8 (4\%) & 84.4 (84.6) \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Idea 4: Hybrid GRAM validation run summaries (top) and posterior-sampling / unseen-solution diagnostics (bottom; bold/underline omitted in bottom table because rows span different tasks).}
+  \label{tab:idea4}
+\end{table}
+
+\paragraph{Results.}
+As an implementation sanity check, setting \texttt{PRIOR\_ROWS=0} reproduces standard GRAM on heyawake ($79.0 / 71.9 / 33.5$ (83\%)). However, with \textbf{any positive share of prior rows}, diversity collapses (0.9--2.1 distinct@100 at reference $\beta$; Table~\ref{tab:idea4}):
+\begin{itemize}
+  \item \textbf{Shared weights learn to ignore guidance:} Training the prior rows with MinLoss teaches the shared recursive network to commit to a fixed canonical solution regardless of its stochastic guidance. Strikingly, even \emph{posterior sampling}---which feeds the network target-conditioned posterior vectors---drops from 13.2 (33\%) to \textbf{0.9 (2\%)} distinct@100 on heyawake at 25\% prior rows.
+  \item \textbf{Collateral validity damage on multi-solution inputs:} Once the shared network ignores its stochastic guidance, the remaining posterior rows (75\% of the batch) are still trained toward a randomly sampled stored solution per epoch without any usable signal indicating which one. On Sudoku, this conflict pulls predictions toward invalid solution mixtures, dropping overall validity from 92.5\% to \textbf{62.7\%} even while unique-solution validity rises to 99.6\%.
+\end{itemize}
+
+% -----------------------------------------------------------------------------
+\subsection{Idea 5: Gradient Through All Transitions}
+\label{sec:idea5}
+
+\paragraph{Hypothesis and change.}
+{\sloppy Idea 3 suggested a concrete structural bottleneck in \Bok{}: during training, gradients are detached between transitions inside each supervision step, so only the third (final) transition carries gradient, and the only stochastic guidance on that gradient path is sampled independently per cell immediately before decoding. Unrolling gradients across \textbf{all three transitions} of every supervision step (\texttt{FULL\_GRAD=1} in \texttt{scripts/multi\_compare.sh}, setting \texttt{grad\_all\_transitions=True} in \texttt{gram.py}; $\sim 3\times$ activation memory) allows stochastic guidance injected in earlier transitions to coordinate global trajectory choices through self-attention.\par}
+
+\begin{table}[!ht]
+  \centering
+  \small
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Task} & \textbf{\Bok{}} & \textbf{+ gradient through all transitions} & \textbf{$\sigma = 0.5$} & \textbf{$\sigma = 1$} \\
+    \midrule
+    Sudoku & \secbest{99.2} / 99.3 / 10.4 (26\%) & \textbf{99.5} / \textbf{99.7} / 17.0 (43\%) & \textbf{99.5} / \secbest{99.6} / \secbest{21.8} (55\%) & 97.9 / 98.9 / \textbf{28.1} (72\%) \\
+    Maze (40k steps) & \textbf{83.3} / \textbf{75.4} / 2.2 (5\%) & \secbest{81.2} / 68.8 / 3.6 (8\%) & \textbf{83.3} / \secbest{71.9} / \secbest{6.7} (15\%) & 78.2 / 66.5 / \textbf{10.4} (24\%) \\
+    Heyawake & 85.3 / 81.9 / \secbest{9.7} (24\%) & \secbest{90.2} / \secbest{92.2} / 5.5 (14\%) & \textbf{90.5} / \textbf{93.0} / 7.7 (19\%) & 82.1 / 88.1 / \textbf{10.6} (26\%) \\
+    Nurikabe & 78.7 / 78.4 / \textbf{7.2} (19\%) & \textbf{87.3} / \textbf{86.9} / 4.8 (12\%) & \secbest{84.8} / \secbest{84.5} / \secbest{6.1} (16\%) & 69.3 / 72.5 / 5.6 (14\%) \\
+    Graph colouring & \textbf{99.8} / \textbf{100.0} / \textbf{38.4} (79\%) & 83.8 / 89.7 / 25.9 (54\%) & \secbest{99.0} / \secbest{99.5} / 26.3 (54\%) & 94.5 / 97.1 / \secbest{31.9} (66\%) \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Idea 5: \Bok{} with gradients kept through all transitions of each supervision step (first two model columns: validation run summaries; $\sigma$ columns: test-time state noise on the final checkpoint). Maze \texttt{FULL\_GRAD} was trained for 40k steps.}
+  \label{tab:idea5}
+\end{table}
+
+\paragraph{Results across task families.}
+Table~\ref{tab:idea5} shows three distinct regimes:
+\begin{enumerate}
+  \item \textbf{Generated grid puzzles (Sudoku and Maze):} Idea 5 is the first training modification in our study that increases \Bok{}'s diversity without sacrificing validity---Sudoku rises from $99.2 / 99.3 / 10.4$ (26\%) to \textbf{$99.5 / 99.7 / 17.0$ (43\%)} (reaching $28.1$ (72\%) with test-time state noise $\sigma=1$, matching Idea 1's ceiling), and mazes rise from $2.2$ (5\%) to $3.6$ (8\%) (and $10.4$ (24\%) at $\sigma=1$) after just 40k optimiser steps.
+  \item \textbf{Human-made puzzles (Heyawake and Nurikabe):} Full-transition gradients substantially strengthen solving accuracy (+4.9 to +8.6 points overall validity, and +8.5 to +10.3 points unique-solution validity) while reducing \texttt{distinct@100}. Importantly, this still improves the Pareto frontier over linearly interpolating (time-sharing) between \Bok{} and MinLoss: on nurikabe, Idea 5 achieves \textbf{4.8 distinct@100 (12\%)} at \textbf{87.3\% validity}, where interpolating between \Bok{} and MinLoss yields only 2.2 (6\%), while outperforming GRAM's validity by 5.3 points.
+  \item \textbf{Instability on Graph colouring (and with Balanced):} On graph colouring, full-transition gradients hurt both metrics and destabilise training: validation checkpoints swing widely (run summary validity 83.8\%, whereas the final checkpoint reaches 99.0\% at $\sigma=0.5$), and \texttt{distinct@100} drops from 38.4 (79\%) to 25.9 (54\%). Combining \texttt{FULL\_GRAD=1} with Idea 3's \texttt{Balanced} objective on Sudoku exhibits similar checkpoint instability ($78.6 / 75.9 / 12.6$ (32\%) run summary, with one checkpoint dipping to 39.5\% validity).
+\end{enumerate}
+
+% =============================================================================
+\section{Synthesis of Main Results}
+\label{sec:main_results}
+% =============================================================================
+
+Table~\ref{tab:main_summary} and Figure~\ref{fig:main_frontier} bring together the validation run summaries of our three baseline models alongside Idea 5 across all five benchmarks.
+
+\begin{table}[!ht]
+  \centering
+  \small
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Task (Validation run summaries)} & \textbf{GRAM} & \textbf{\Bok{}} & \textbf{Idea 5 (\bok{} + full grad)} & \textbf{MinLoss} \\
+    \midrule
+    Sudoku & 92.5 / 97.6 / \textbf{34.0} (87\%) & \secbest{99.2} / 99.3 / 10.4 (26\%) & \textbf{99.5} / \secbest{99.7} / \secbest{17.0} (43\%) & \textbf{99.5} / \textbf{99.8} / 2.5 (6\%) \\
+    Graph colouring & 97.0 / 97.4 / \textbf{44.9} (93\%) & \textbf{99.8} / \textbf{100.0} / \secbest{38.4} (79\%) & 83.8 / 89.7 / 25.9 (54\%) & \secbest{99.7} / \secbest{99.5} / 1.8 (4\%) \\
+    Maze (GRAM $\frac{1}{2}\beta$; Idea 5 40k) & 67.3 / 48.2 / \textbf{35.3} (81\%) & \secbest{83.3} / \secbest{75.4} / 2.2 (5\%) & 81.2 / 68.8 / \secbest{3.6} (8\%) & \textbf{88.4} / \textbf{94.1} / 1.0 (2\%) \\
+    Heyawake & 78.7 / 72.0 / \textbf{33.8} (84\%) & 85.3 / 81.9 / \secbest{9.7} (24\%) & \secbest{90.2} / \secbest{92.2} / 5.5 (14\%) & \textbf{96.2} / \textbf{97.6} / 1.3 (3\%) \\
+    Nurikabe & 82.0 / 83.9 / \textbf{29.8} (77\%) & 78.7 / 78.4 / \secbest{7.2} (19\%) & \secbest{87.3} / \secbest{86.9} / 4.8 (12\%) & \textbf{89.1} / \textbf{94.4} / 1.2 (3\%) \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Summary comparison across all five tasks on validation (validity (\%) / unique-solution validity (\%) / distinct@100 (\% of uniform sampler)).}
+  \label{tab:main_summary}
+\end{table}
+
+\begin{figure}[!ht]
+  \centering
+  \begin{tikzpicture}
+    \begin{groupplot}[
+      group style={group size=3 by 2, horizontal sep=1.2cm, vertical sep=1.65cm},
+      width=4.8cm, height=3.4cm,
+      xmin=60, xmax=102, ymin=0,
+      xlabel={\footnotesize Validity (\%)},
+      tick label style={font=\scriptsize},
+      label style={font=\footnotesize},
+      title style={font=\small\bfseries, text=navy, yshift=-2pt},
+      grid=both,
+      major grid style={gray!20},
+    ]
+      \nextgroupplot[title={Sudoku}, ylabel={\footnotesize Distinct@100}, ymax=40]
+        \addplot[only marks, mark=*, mark size=2.3pt, accentblue] coordinates {(92.5,34.0)};
+        \addplot[only marks, mark=square*, mark size=2.0pt, accentred] coordinates {(99.2,10.4)};
+        \addplot[only marks, mark=diamond*, mark size=2.5pt, accentgreen] coordinates {(99.5,17.0)};
+        \addplot[only marks, mark=triangle*, mark size=2.4pt, slate] coordinates {(99.5,2.5)};
+
+      \nextgroupplot[title={Graph colouring}, ymax=50]
+        \addplot[only marks, mark=*, mark size=2.3pt, accentblue] coordinates {(97.0,44.9)};
+        \addplot[only marks, mark=square*, mark size=2.0pt, accentred] coordinates {(99.8,38.4)};
+        \addplot[only marks, mark=diamond*, mark size=2.5pt, accentgreen] coordinates {(83.8,25.9)};
+        \addplot[only marks, mark=triangle*, mark size=2.4pt, slate] coordinates {(99.7,1.8)};
+
+      \nextgroupplot[title={Maze}, ymax=40]
+        \addplot[only marks, mark=*, mark size=2.3pt, accentblue] coordinates {(67.3,35.3)};
+        \addplot[only marks, mark=square*, mark size=2.0pt, accentred] coordinates {(83.3,2.2)};
+        \addplot[only marks, mark=diamond*, mark size=2.5pt, accentgreen] coordinates {(81.2,3.6)};
+        \addplot[only marks, mark=triangle*, mark size=2.4pt, slate] coordinates {(88.4,1.0)};
+
+      \nextgroupplot[title={Heyawake}, ylabel={\footnotesize Distinct@100}, ymax=40]
+        \addplot[only marks, mark=*, mark size=2.3pt, accentblue] coordinates {(78.7,33.8)};
+        \addplot[only marks, mark=square*, mark size=2.0pt, accentred] coordinates {(85.3,9.7)};
+        \addplot[only marks, mark=diamond*, mark size=2.5pt, accentgreen] coordinates {(90.2,5.5)};
+        \addplot[only marks, mark=triangle*, mark size=2.4pt, slate] coordinates {(96.2,1.3)};
+
+      \nextgroupplot[title={Nurikabe}, ymax=40,
+        legend style={font=\footnotesize, at={(1.32,0.5)}, anchor=west, draw=none, fill=none, legend cell align=left, row sep=2pt}]
+        \addplot[only marks, mark=*, mark size=2.3pt, accentblue] coordinates {(82.0,29.8)};
+        \addplot[only marks, mark=square*, mark size=2.0pt, accentred] coordinates {(78.7,7.2)};
+        \addplot[only marks, mark=diamond*, mark size=2.5pt, accentgreen] coordinates {(87.3,4.8)};
+        \addplot[only marks, mark=triangle*, mark size=2.4pt, slate] coordinates {(89.1,1.2)};
+        \legend{GRAM, \Bok{}, Idea 5 (\bok{} + full grad), MinLoss}
+    \end{groupplot}
+  \end{tikzpicture}
+  \caption{Validity against \texttt{distinct@100} across all five benchmarks (validation run summaries from Table~\ref{tab:main_summary}; upper-right is better). GRAM dominates diversity on every task, whereas posterior-free models dominate validity.}
+  \label{fig:main_frontier}
+\end{figure}
+
+Six findings summarise our experimental study:
+\begin{enumerate}
+  \item \textbf{No model we tested is both the most valid and the most diverse.} GRAM gives the highest \texttt{distinct@100} on every task; MinLoss or \Bok{} gives the highest validity on every task, with GRAM's diversity costing 0.9--22 points of validity on the test split.
+  \item \textbf{GRAM's $\beta$ works only in a narrow band.} Halving or doubling the reference $\beta$ breaks most tasks via prior--posterior mismatch or collapse, and posterior sampling cleanly diagnoses which side of the band a run lies on.
+  \item \textbf{Every model generates unseen solutions at a uniform sampler's rate.} Storing at most 16 solutions per training input is sufficient to cover the remaining solution set without bias toward stored targets.
+  \item \textbf{Injecting randomness alone does not close the diversity gap} (Ideas 1 and 2). It plateaus near $\sim$28 \texttt{distinct@100} (71\% of uniform) on Sudoku (vs.\ GRAM's 34.0, 87\%) and yields modest or task-inconsistent gains elsewhere.
+  \item \textbf{Training every rollout, or hybridising GRAM with prior-trained MinLoss rows, causes diversity to collapse} (Ideas 3 and 4) as the shared network ceases to use its stochastic guidance.
+  \item \textbf{Keeping gradients through all transitions is the most promising architectural change} (Idea 5), lifting diversity on Sudoku and mazes at comparable validity and improving solving accuracy and the validity--diversity trade-off on nurikabe, though introducing instability on graph colouring.
+\end{enumerate}
+
+% =============================================================================
+\section{Compute Footprint and Code Organisation}
+\label{sec:compute}
+% =============================================================================
+
+All experiments were run in Python 3.12 with PyTorch 2.14.1 and CUDA 13.0 on NVIDIA A100 80GB GPUs across two compute clusters. Table~\ref{tab:compute} summarises the typical wall-clock cost of training and evaluation jobs (full details in \texttt{COMPUTE.md}).
+
+\begin{table}[!ht]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{@{}llcc@{}}
+    \toprule
+    \textbf{Job type} & \textbf{Task / setting} & \textbf{A100 80GB GPUs} & \textbf{Wall-clock time} \\
+    \midrule
+    Training (150k steps: GRAM, \Bok{}, MinLoss, Hybrid) & Graph colouring & 1 & $\sim$10 h (4.3 steps/s) \\
+    Training (150k steps: GRAM, \Bok{}, MinLoss, Hybrid) & Sudoku & 1 & $\sim$12 h (3.5 steps/s) \\
+    Training (150k steps: GRAM, \Bok{}, MinLoss, Hybrid) & Heyawake, Nurikabe & 1 & $\sim$15 h (2.7--2.9 steps/s) \\
+    Training (150k steps: GRAM, \Bok{}, MinLoss, Hybrid) & Maze & 1 & $\sim$31 h (1.3 steps/s) \\
+    Training (\texttt{FULL\_GRAD=1}, 150k steps) & Graph / Sudoku / PPBench & 1 (or 2) & $\sim$11 h / $\sim$15 h / $\sim$17 h ($\sim$9 h on 2) \\
+    Training (\texttt{FULL\_GRAD=1}, Maze) & Maze (OOM on 1 GPU) & 2 & $\sim$5 h for 40k steps ($\sim$18 h for 150k) \\
+    \midrule
+    Checkpoint sweep (\texttt{score\_checkpoints.sh}) & 10 ckpts $\times$ 500 $\times$ 100 & 1 & $\sim$2--3 h (Maze $\sim$5 h) \\
+    Full split eval (\texttt{multi\_evaluate.sh ... test/train}) & 2,000 $\times$ 100 samples & 1 & $\sim$1 h (Maze $\sim$2 h) \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Hardware and approximate wall-clock runtime per job. Across roughly 70 training runs of 150k steps (each followed by checkpoint sweeps and single-checkpoint evaluations), the total compute footprint of the project was on the order of 1,000 A100-hours.}
+  \label{tab:compute}
+\end{table}
+
+\paragraph{Repository map.}
+Core model definitions reside in \path{models/recursive_reasoning/gram.py} (network recursion, \texttt{VariationalLayer}, STRM recursion, \path{grad_all_transitions}, and \texttt{hybrid}) and \path{models/losses.py} (\texttt{ACTLossHead}, \path{target_set_losses}, and \path{balanced_assignment}). Dataset builders and exact solution checkers live in \path{dataset/} and \path{evaluators/*_utils.py}. End-to-end training, checkpoint sweeps, and summary extraction are automated through \path{scripts/multi_compare.sh}, \path{scripts/score_checkpoints.sh}, \path{scripts/multi_evaluate.sh}, \path{scripts/checkpoint_trends.py}, and \path{scripts/report_numbers.py}.
+
+% =============================================================================
+\section{Limitations and Future Work}
+\label{sec:future}
+% =============================================================================
+
+\paragraph{Limitations.}
+Because each 150k-step run plus evaluation takes 12--38 GPU-hours, reported comparisons use a single training seed (seed 42), validation run summaries are computed on 500 inputs per checkpoint, and the maze \texttt{FULL\_GRAD=1} run was trained for 40k steps due to two-GPU memory requirements. In addition, matching total sequence throughput at 768 sequences per optimiser step means that \Bok{} ($K=8$) sees $8\times$ fewer distinct puzzle inputs per step (96 vs.\ 768) than GRAM and MinLoss, which does not separate rollout count from dataset passes and may account for part of \Bok{}'s validation validity gap on mazes.
+
+\paragraph{Future directions.}
+\begin{itemize}
+  \item \textbf{Direct mechanistic measurement of guidance sensitivity:} In Ideas 3 and 4 we inferred that models ignore their stochastic guidance from the collapse in decoded output diversity. A direct test would hold the input fixed, vary \emph{only} the stochastic guidance $\epsilon_t$, and measure intermediate changes in the high-level state $h_t$ and output logits across transitions.
+  \item \textbf{Combining persistent global randomness with full-transition gradients:} Idea 5 showed that unrolling gradients through earlier transitions helps \Bok{} use randomness, while Idea 2 introduced sample-level vectors capable of representing a global choice. Combining sample-level randomness with \texttt{FULL\_GRAD=1} (and stabilising training via gradient clipping or learning-rate schedules before revisiting Idea 3's all-rollout objectives) is a natural next step.
+  \item \textbf{Input-adaptive $\beta$:} Selecting uniformly among $n$ valid solutions requires roughly $\ln n$ nats of information in the stochastic guidance. Scaling GRAM's KL weight $\beta$ per input (or targeting a free-bits / target-KL budget conditioned on puzzle ambiguity) could avoid forcing a single $\beta$ to simultaneously fit unique-solution and 500-solution puzzles.
+  \item \textbf{Matched puzzle exposures and stronger statistical evidence:} Decoupling rollout count $K$ from dataset passes, running multiple random seeds, evaluating every ablation on the full test split, and training a single multi-task model across all five puzzle types.
+  \item \textbf{Energy-based reasoners and broader human-made benchmarks:} Comparing recursive latent-guidance models against recent energy-based recurrent reasoners~\cite{chen2026,hoover2026}---which score complete candidate solutions globally---and expanding to larger grids and additional puzzle families from Pencil Puzzle Bench~\cite{waugh2026}.
+\end{itemize}
+
+\section*{AI Use Statement}
+AI coding and writing assistants were used during this project to help implement and debug training, dataset, and evaluation scripts, check summary tables, and assist in drafting and editing project documentation and slides. All experimental design choices, cluster runs, result verifications, and scientific conclusions are the authors' own work and responsibility.
+
+% =============================================================================
+\begin{thebibliography}{99}
+
+\bibitem{baek2026}
+Baek, J.\ et al.
+Generative Recursive Reasoning.
+Preprint at \url{https://doi.org/10.48550/arXiv.2605.19376} (2026).
+
+\bibitem{jolicoeur2025}
+Jolicoeur-Martineau, A.
+Less is More: Recursive Reasoning with Tiny Networks.
+Preprint at \url{https://doi.org/10.48550/arXiv.2510.04871} (2025).
+
+\bibitem{wang2025}
+Wang, G.\ et al.
+Hierarchical Reasoning Model.
+Preprint at \url{https://doi.org/10.48550/arXiv.2506.21734} (2025).
+
+\bibitem{waugh2026}
+Waugh, J.
+Pencil Puzzle Bench: A Benchmark for Multi-Step Verifiable Reasoning.
+Preprint at \url{https://doi.org/10.48550/arXiv.2603.02119} (2026).
+
+\bibitem{gebser2019}
+Gebser, M., Kaminski, R., Kaufmann, B.\ \& Schaub, T.
+Multi-shot ASP solving with clingo.
+\emph{Theory and Practice of Logic Programming} \textbf{19}, 27--82 (2019).
+
+\bibitem{guzman2012}
+Guzman-Rivera, A., Batra, D.\ \& Kohli, P.
+Multiple Choice Learning: Learning to Produce Multiple Structured Outputs.
+In \emph{Advances in Neural Information Processing Systems} \textbf{25} (2012).
+
+\bibitem{bhattacharyya2018}
+Bhattacharyya, A., Schiele, B.\ \& Fritz, M.
+Accurate and Diverse Sampling of Sequences based on a ``Best of Many'' Sample Objective.
+In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition} (2018).
+
+\bibitem{nandwani2021}
+Nandwani, Y., Jindal, D., Mausam \& Singla, P.
+Neural Learning of One-of-Many Solutions for Combinatorial Problems in Structured Output Spaces.
+In \emph{International Conference on Learning Representations} (2021).
+
+\bibitem{sghaier2026}
+Sghaier, A., Parviz, A.\ \& Jolicoeur-Martineau, A.
+Probabilistic Tiny Recursive Model.
+Preprint at \url{https://doi.org/10.48550/arXiv.2605.19943} (2026).
+
+\bibitem{glass2026}
+Glass, T., Zhang, Z.\ \& Swoboda, P.
+Simpler Tiny Recursive Models.
+Preprint at \url{https://doi.org/10.48550/arXiv.2611.23677} (2026).
+
+\bibitem{sohn2015}
+Sohn, K., Lee, H.\ \& Yan, X.
+Learning Structured Output Representation using Deep Conditional Generative Models.
+In \emph{Advances in Neural Information Processing Systems} \textbf{28} (2015).
+
+\bibitem{chen2026}
+Chen, W.\ X., Gladstone, A., Li, Z.\ M., Ji, H.\ \& Du, Y.
+Energy-Based Reasoners: Your Recurrent Reasoner Should Be an Energy-Based Model.
+Preprint at \url{https://doi.org/10.48550/arXiv.2611.08977} (2026).
+
+\bibitem{hoover2026}
+Hoover, B., Blayney, H.\ \& Whittington, J.\ C.\ R.
+Classical Energies Learn to Reason 1,000x Faster than Looped Models.
+Preprint at \url{https://doi.org/10.48550/arXiv.2611.17309} (2026).
+
+\end{thebibliography}
+
+\end{document}
